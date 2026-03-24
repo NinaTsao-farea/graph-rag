@@ -1,13 +1,26 @@
 # 檔案一：標案解析與圖片提取
 import os
+import google.generativeai as genai
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.datamodel.base_models import InputFormat
 
-def process_tender_with_images(file_path, output_dir):
-    # 1. 啟動圖片提取與 300 DPI 強化
+# 1. 設定 Gemini API (用於視覺辨識)
+genai.configure(api_key="你的_GEMINI_API_KEY")
+vision_model = genai.GenerativeModel('gemini-1.5-flash') # 建議用 Flash，速度快且便宜
+
+def describe_image_with_gemini(pil_image):
+    """將 PIL 圖片直接傳給 Gemini 進行視覺描述"""
+    prompt = "這是一張標案或產品 DM 中的圖表。請詳細描述其內容（如產品規格、金額、日期或機房佈線邏輯），並以繁體中文回答。"
+    try:
+        response = vision_model.generate_content([prompt, pil_image])
+        return response.text
+    except Exception as e:
+        return f"[圖片解析失敗: {str(e)}]"
+
+def process_tender_with_images_v2(file_path, output_dir):
     pipeline_options = PdfPipelineOptions()
-    pipeline_options.generate_picture_images = True # 這是關鍵：真正把圖切出來
+    pipeline_options.generate_picture_images = True
     pipeline_options.images_scale = 4.16 
     
     format_options = {InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
@@ -16,48 +29,54 @@ def process_tender_with_images(file_path, output_dir):
     result = converter.convert(file_path)
     doc = result.document
     
-    # 建立圖片存放資料夾
     file_id = os.path.splitext(os.path.basename(file_path))[0]
     image_save_dir = os.path.join(output_dir, "images", file_id)
     os.makedirs(image_save_dir, exist_ok=True)
 
-    # 2. 遍歷文件模型，重建 Markdown
     md_output = []
     image_counter = 0
 
+    print(f"开始處理: {file_id} ...")
+
     for item, level in doc.iterate_items():
-        # 如果是文字內容
+        # A. 處理文字與表格 (維持不變)
         if hasattr(item, "text") and not hasattr(item, "image"):
             md_output.append(item.text)
-        
-        # 如果是表格內容
         elif hasattr(item, "export_to_markdown") and not hasattr(item, "image"):
             md_output.append(item.export_to_markdown())
 
-        # 如果是圖片元素 (PictureItem)
-        elif hasattr(item, "image"):
+        # B. 處理圖片 (增加 NoneType 安全檢查)
+        elif hasattr(item, "image") and item.image is not None:
             image_counter += 1
             image_filename = f"image_{image_counter}.png"
             image_path = os.path.join(image_save_dir, image_filename)
             
-            # 儲存圖片檔案
-            item.image.pil_image.save(image_path)
-            
-            # --- 這裡就是你的 POC 加分項：插入 Gemini Vision 描述 ---
-            # 這裡我們先放一個具備「位置資訊」的標籤
-            # 未來這裡會由 describe_image_with_gemini(image_path) 替換
-            img_placeholder = f"\n> **[圖表編號：{image_filename} | 位置：此處緊跟在上述文字之後]**\n"
-            img_placeholder += f"> *[提示：請將此圖片送往 Gemini Vision 獲取施工圖/DM 描述]*\n"
-            
-            md_output.append(img_placeholder)
+            # 安全存取 pil_image
+            try:
+                pil_img = item.image.pil_image
+                if pil_img:
+                    # 1. 實體儲存圖片檔案 (用於備份)
+                    pil_img.save(image_path)
+                    
+                    # 2. 呼叫 Gemini Vision 獲取文字描述
+                    print(f"  🔍 正在辨識圖片 {image_filename}...")
+                    vision_description = describe_image_with_gemini(pil_img)
+                    
+                    # 3. 將描述直接嵌入 Markdown 位置
+                    md_output.append(f"\n> ### 🖼️ 圖表解析: {image_filename}")
+                    md_output.append(f"> {vision_description}\n")
+                else:
+                    md_output.append("\n> [圖片內容為空，無法解析]\n")
+            except Exception as e:
+                print(f"  ⚠️ 圖片處理異常: {str(e)}")
+                md_output.append(f"\n> [圖片處理失敗: {image_filename}]\n")
 
-    # 3. 儲存最終整合後的 Markdown
+    # 儲存最終 Markdown
     final_md_path = os.path.join(output_dir, f"{file_id}.md")
     with open(final_md_path, "w", encoding="utf-8") as f:
         f.write("\n\n".join(md_output))
     
-    print(f"✅ 定位完成！Markdown 與圖片已分離並關聯。")
-    print(f"🖼️ 圖片存儲於: {image_save_dir}")
+    print(f"✨ POC 文件解析完成！輸出路徑: {final_md_path}")
 
 def batch_process_folders():
     """
@@ -77,7 +96,7 @@ def batch_process_folders():
             # 同時支援 pdf 與 docx
             if file.lower().endswith(('.pdf', '.docx')):
                 full_path = os.path.join(src, file)
-                process_tender_with_images(full_path, dest)
+                process_tender_with_images_v2(full_path, dest)
 
 if __name__ == "__main__":
     batch_process_folders()
