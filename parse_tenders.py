@@ -12,7 +12,15 @@ load_dotenv()
 # 1. 設定 Gemini API (用於視覺辨識)
 api_key = os.getenv("GEMINI_API_KEY") 
 genai.configure(api_key=api_key)
-vision_model = genai.GenerativeModel('gemini-1.5-flash') # 建議用 Flash，速度快且便宜
+
+try:
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            print(f"👉 模型名稱: {m.name}")
+except Exception as e:
+    print(f"❌ 查詢失敗: {e}")
+    
+vision_model = genai.GenerativeModel('gemini-3-flash') # 建議用 Flash，速度快且便宜
 
 def describe_image_with_gemini(pil_image):
     """將 PIL 圖片直接傳給 Gemini 進行視覺描述"""
