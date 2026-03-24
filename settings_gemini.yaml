@@ -1,0 +1,18 @@
+# 檔案二：GraphRAG 切換配置
+# 關鍵配置區塊：切換引擎邏輯
+llm:
+  type: openai_chat # Gemini 與 Azure 皆可相容此接口
+  api_base: ${GRAPHRAG_API_BASE}
+  api_key: ${GRAPHRAG_API_KEY}
+  model: ${GRAPHRAG_MODEL} # 例如 gemini-3.0-flash 或 gpt-4o
+  concurrent_requests: 2 # 免費額度建議設小，避免 429 錯誤
+
+embeddings:
+  llm:
+    type: openai_embedding # 若為 Azure 請改為 azure_openai_embedding
+    api_base: ${GRAPHRAG_API_BASE}
+    api_key: ${GRAPHRAG_API_KEY}
+    model: text-embedding-004 # Gemini 建議值
+    
+# 圖片解析通用 Prompt (放置於系統指令中)
+# 提示：此部分需在 GraphRAG 的指令模板資料夾中修改 (prompts/entity_extraction.txt)
