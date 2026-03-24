@@ -2,27 +2,25 @@
 import pandas as pd
 import os
 
-def generate_comparison_report(gemini_dir, azure_dir):
-    def get_stats(path):
-        # 讀取 GraphRAG 核心 Parquet 檔案
-        n = pd.read_parquet(os.path.join(path, "artifacts", "create_final_nodes.parquet"))
-        e = pd.read_parquet(os.path.join(path, "artifacts", "create_final_relationships.parquet"))
-        return len(n), len(e)
+def generate_report(output_dir, engine_name):
+    # GraphRAG 3.0.x 的 artifacts 路徑
+    nodes_path = os.path.join(output_dir, "artifacts", "create_final_nodes.parquet")
+    
+    if not os.path.exists(nodes_path):
+        print(f"⚠️ 找不到資料: {nodes_path}")
+        return
 
-    g_n, g_e = get_stats(gemini_dir)
-    a_n, a_e = get_stats(azure_dir)
+    df_nodes = pd.read_parquet(nodes_path)
+    
+    # 統計標案 vs 門市 (假設檔案名稱包含標籤)
+    gov_count = len(df_nodes[df_nodes['source_id'].str.contains('government', na=False)])
+    rtl_count = len(df_nodes[df_nodes['source_id'].str.contains('retail', na=False)])
 
-    report = f"""
-    # POC 評測結果 (Gemini 3.0 vs Azure GPT-4o)
-    | 指標 | Gemini (Google) | Azure (Microsoft) |
-    | :--- | :--- | :--- |
-    | 實體總數 (Nodes) | {g_n} | {a_n} |
-    | 關係連線 (Edges) | {g_e} | {a_e} |
-    | 關係密度 (E/N) | {round(g_e/g_n, 2)} | {round(a_e/a_n, 2)} |
-    """
-    with open("Comparison_Report.md", "w", encoding="utf-8") as f:
-        f.write(report)
-    print("✅ 比較報告已生成：Comparison_Report.md")
+    print(f"\n--- {engine_name} POC 分類統計 ---")
+    print(f"標案實體數: {gov_count}")
+    print(f"門市實體數: {rtl_count}")
+    print(f"總關聯邊數: {len(df_nodes)}") # 簡化示範
 
 if __name__ == "__main__":
-    generate_comparison_report("./output_gemini", "./output_azure")
+    # 執行比對
+    generate_report("./ragtest/output", "Gemini-GraphRAG-3.0.6")
