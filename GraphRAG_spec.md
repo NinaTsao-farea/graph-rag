@@ -72,3 +72,25 @@
 1.  **POC 原始程式碼**（含地端解析、GraphRAG 腳本）。
 2.  **雙引擎對比評估報告**（Markdown 格式）。
 3.  **系統佈署與操作說明書**。
+
+---
+
+## 7.環境設定   
+### 1.核心開發環境
+| 軟體名稱 | 建議版本 | 說明 |
+| :--- | :--- | :--- |
+| Python | 3.10.x - 3.11.x | GraphRAG 對 3.12 的支援尚在完善中，3.10 最穩定。 |
+| Node.js | 18.x 或 20.x (LTS) | 若後續需部署 GraphRAG 可視化介面時需要。 |
+| Docker Desktop | 4.25.0+ | 用於運行本地向量資料庫 (Qdrant) 或 Neo4j。 |
+
+### 2. 關鍵 Python 函式庫 (Python Packages)
+| 套件名稱 | 建議版本 | 說明 |
+| :--- | :--- | :--- |
+| docling | 1.2.x+ | IBM 出品，負責 PDF/Word 解析與 300 DPI 圖片提取。 |
+| graphrag | 0.3.x+ | Microsoft 核心框架，負責知識圖譜建立與檢索。 |
+| pandas | 2.1.x+ | 用於 compare_results.py 數據處理與報告生成。 |
+| pyarrow | 14.0.x+ | 處理 GraphRAG 輸出的 Parquet 檔案必備。 |
+| Pillow (PIL) | 10.x+ | 用於檢查圖片 DPI 與影像預處理。 |
+| python-dotenv | 1.0.x+ | 管理 Gemini 與 Azure 的 API Key 環境變數。 |
+| openai | 1.30.x+ | 用於調用 Azure 與 Gemini (OpenAI 兼容接口)。 |
+
