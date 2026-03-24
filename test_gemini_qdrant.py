@@ -1,3 +1,4 @@
+# 檔案三：門市 DM 向量測試
 import os
 import google.generativeai as genai
 from qdrant_client import QdrantClient
