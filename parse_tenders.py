@@ -4,9 +4,14 @@ import google.generativeai as genai
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.datamodel.base_models import InputFormat
+from dotenv import load_dotenv
+
+# 0. 手動讀取 .env 檔案
+load_dotenv()
 
 # 1. 設定 Gemini API (用於視覺辨識)
-genai.configure(api_key="你的_GEMINI_API_KEY")
+api_key = os.getenv("GEMINI_API_KEY") 
+genai.configure(api_key=api_key)
 vision_model = genai.GenerativeModel('gemini-1.5-flash') # 建議用 Flash，速度快且便宜
 
 def describe_image_with_gemini(pil_image):
