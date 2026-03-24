@@ -1,3 +1,4 @@
+# 檔案一：標案解析與圖片提取
 import os
 from docling.document_converter import DocumentConverter
 from docling.datamodel.pipeline_options import PdfPipelineOptions
