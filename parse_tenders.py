@@ -5,36 +5,35 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.datamodel.base_models import InputFormat
 
 def process_document(file_path, output_dir):
-    """
-    支援 PDF 與 Word (.docx) 自動識別與解析
-    """
-    # 針對 PDF 的影像強化設定 (Word 檔案會自動跳過此設定，不影響運行)
+    # 1. 設定 PDF 專用的解析選項 (如 300 DPI 影像強化)
     pipeline_options = PdfPipelineOptions()
     pipeline_options.generate_picture_images = True
-    pipeline_options.images_scale = 4.16  # 確保標案圖表達到 300 DPI
+    pipeline_options.images_scale = 4.16 
     
-    # 初始化轉換器
-    converter = DocumentConverter(pipeline_options=pipeline_options)
+    # 2. 將選項封裝進 PdfFormatOption (這是新版 API 的關鍵)
+    # 我們告訴轉換器：遇到 PDF 時請使用這套 pipeline_options
+    format_options = {
+        InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+    }
+    
+    # 3. 初始化轉換器，改用 format_options 關鍵字
+    converter = DocumentConverter(format_options=format_options)
     
     print(f"🚀 正在解析文件: {file_path} ...")
     
     try:
-        # Docling 會根據副檔名自動判斷 InputFormat.PDF 或 InputFormat.DOCX
         result = converter.convert(file_path)
         
-        # 確保輸出目錄存在
         if not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
             
-        # 產生輸出檔名 (.md)
         file_name = os.path.splitext(os.path.basename(file_path))[0]
         md_path = os.path.join(output_dir, f"{file_name}.md")
         
-        # 導出為 Markdown 格式
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(result.document.export_to_markdown())
             
-        print(f"✅ 解析成功！Markdown 已儲存至: {md_path}")
+        print(f"✅ 解析成功！已儲存至: {md_path}")
         return md_path
 
     except Exception as e:
