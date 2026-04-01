@@ -5,12 +5,13 @@ import base64
 import argparse
 import shutil
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, DocumentContentFormat
@@ -26,15 +27,84 @@ AZURE_DI_ENDPOINT = os.getenv("AZURE_COGNITIVE_SERVICES_ENDPOINT")
 AZURE_DI_KEY = os.getenv("AZURE_COGNITIVE_SERVICES_KEY")
 
 # ─────────────────────────────────────────────────────────────
-# 2. Azure OpenAI Vision 客戶端 (圖表描述用)
+# 2. Vision 模型設定（可在解析時手動選擇）
 # ─────────────────────────────────────────────────────────────
+
+def _load_azure_models() -> dict[str, dict]:
+    """
+    自動掃描 .env 中的 Azure 部署設定：
+      - 無後綴：AZURE_OPENAI_DEPLOYMENT
+      - 編號後綴：AZURE_OPENAI_DEPLOYMENT_2, _3, _4...（發現空白即停止）
+    每個部署可獨立設定 API_KEY / ENDPOINT / API_VERSION（未設時退回無後綴版本）。
+    """
+    models: dict[str, dict] = {}
+    suffixes = [""] + [f"_{i}" for i in range(2, 10)]
+    for sfx in suffixes:
+        dep = os.getenv(f"AZURE_OPENAI_DEPLOYMENT{sfx}")
+        if not dep:
+            if sfx:  # 遇到缺口就停止（_2 缺就不繼續找 _3）
+                break
+            continue
+        key = f"azure_{dep}"
+        models[key] = {
+            "label":      f"Azure {dep}",
+            "type":       "azure",
+            "api_key":    os.getenv(f"AZURE_OPENAI_API_KEY{sfx}",    os.getenv("AZURE_OPENAI_API_KEY")),
+            "endpoint":   os.getenv(f"AZURE_OPENAI_ENDPOINT{sfx}",   os.getenv("AZURE_OPENAI_ENDPOINT")),
+            "api_version":os.getenv(f"AZURE_OPENAI_API_VERSION{sfx}", os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")),
+            "deployment": dep,
+        }
+    return models
+
+
+VISION_MODELS: dict[str, dict] = _load_azure_models()
+VISION_MODELS["gemini"] = {
+    "label":      f"Gemini {os.getenv('GEMINI_MODEL', 'gemini-3.0-flash')}",
+    "type":       "openai_compat",
+    "api_key":    os.getenv("GEMINI_API_KEY", ""),
+    "base_url":   os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+    "deployment": os.getenv("GEMINI_MODEL", "gemini-3.0-flash"),
+}
+
+# 第一個 Azure 部署為預設
+DEFAULT_VISION_MODEL_ID = next(
+    (k for k, v in VISION_MODELS.items() if v["type"] == "azure"),
+    next(iter(VISION_MODELS)),
+)
+
+# 向下相容 — CLI / batch_process_folders 使用
+AZURE_DEPLOYMENT = VISION_MODELS.get(DEFAULT_VISION_MODEL_ID, {}).get("deployment", "gpt-5.4")
 azure_client = AzureOpenAI(
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
 )
-AZURE_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
-print(f"👉 Azure OpenAI 部署名稱: {AZURE_DEPLOYMENT}")
+_discovered = ", ".join(VISION_MODELS.keys())
+print(f"👉 已載入 Vision 模型: {_discovered}（預設: {DEFAULT_VISION_MODEL_ID}）")
+
+
+def build_vision_client(model_id: str | None = None) -> tuple:
+    """
+    依 model_id 建立 Vision 客戶端。
+    回傳 (client, deployment, label) 元組。
+    model_id 為 None 或無效時，退回預設 azure 模型。
+    """
+    cfg = VISION_MODELS.get(model_id or DEFAULT_VISION_MODEL_ID)
+    if cfg is None:
+        cfg = VISION_MODELS[DEFAULT_VISION_MODEL_ID]
+
+    if cfg["type"] == "azure":
+        client = AzureOpenAI(
+            api_key=cfg["api_key"],
+            azure_endpoint=cfg["endpoint"],
+            api_version=cfg["api_version"],
+        )
+    else:  # openai_compat（Gemini 等）
+        client = OpenAI(
+            api_key=cfg["api_key"],
+            base_url=cfg["base_url"],
+        )
+    return client, cfg["deployment"], cfg["label"]
 
 # ─────────────────────────────────────────────────────────────
 # 3. 文件類型任務設定（與 parse_tenders.py 一致）
@@ -49,6 +119,18 @@ DOC_TASKS = [
         "vision_prompt": (
             "這是一張政府標案文件中的圖表。"
             "請詳細描述內容（如設備規格、工程場地願圖、機房佈線機制、驗收程序或金額表），"
+            "並專注標案投標資格、違約條款或年限要求等重要標案內容，以繁體中文回答。"
+        ),
+    },
+    {
+        "src":          "./rag_poc/input/mixed_tenders",
+        "dest":         "./ragtest/mixed_tenders/input",
+        "doc_type":     "mixed_tenders",
+        "description":  "軍服標案",
+        "vision_prompt": (
+            "這是一張軍服標案文件中的圖表。"
+            "請詳細描述內容（提取服裝結構、迷彩規格、布料技術數據、徽章配戴位置、尺碼標準。），"
+            "排除：Logo、通用洗衣符號、情境裝飾圖、文件浮水印。"
             "並專注標案投標資格、違約條款或年限要求等重要標案內容，以繁體中文回答。"
         ),
     },
@@ -211,13 +293,41 @@ def _bytes_to_base64(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("utf-8")
 
 
-def describe_image(image_bytes: bytes, vision_prompt: str) -> str:
-    f"""呼叫 Azure OpenAI {AZURE_DEPLOYMENT} Vision 對圖表進行文字描述"""
+def _extract_docx_images(file_path: Path) -> list[bytes]:
+    """
+    DOCX 是 ZIP 檔案，直接從 word/media/ 按檔名順序提取所有嵌入圖片。
+    回傳图片 bytes 清單，順序與文件中圖片出現順序對應。
+    """
+    supported = {"png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"}
+    images: list[bytes] = []
+    try:
+        with zipfile.ZipFile(file_path, "r") as z:
+            media = sorted(
+                n for n in z.namelist()
+                if n.startswith("word/media/")
+                and n.rsplit(".", 1)[-1].lower() in supported
+            )
+            for name in media:
+                images.append(z.read(name))
+    except Exception as e:
+        print(f"  ⚠️  無法讀取 DOCX 內嵌圖片: {e}")
+    return images
+
+
+def describe_image(
+    image_bytes: bytes,
+    vision_prompt: str,
+    client=None,
+    deployment: str | None = None,
+) -> str:
+    """呼叫 Vision 模型對圖表進行文字描述。client/deployment 為 None 時使用預設 Azure 客戶端。"""
     _stats.vision_calls += 1
+    _client = client if client is not None else azure_client
+    _deployment = deployment if deployment is not None else AZURE_DEPLOYMENT
     try:
         b64 = _bytes_to_base64(image_bytes)
-        response = azure_client.chat.completions.create(
-            model=AZURE_DEPLOYMENT,
+        response = _client.chat.completions.create(
+            model=_deployment,
             messages=[
                 {
                     "role": "user",
@@ -321,6 +431,8 @@ def _process_pdf_chunk(
     image_counter: int,
     vision_prompt: str,
     page_offset: int,
+    vision_client=None,
+    vision_deployment: str | None = None,
 ) -> tuple[str, int]:
     """
     對單一 PDF 區塊呼叫 Azure DI，提取圖表並嵌入描述。
@@ -360,8 +472,8 @@ def _process_pdf_chunk(
         image_filename = f"image_{image_counter}.png"
         (image_save_dir / image_filename).write_bytes(image_bytes)
 
-        print(f"  🔍 [AZURE] 正在辨識圖片 {image_filename} ...")
-        vision_desc = describe_image(image_bytes, vision_prompt)
+        print(f"  🔍 正在辨識圖片 {image_filename} ...")
+        vision_desc = describe_image(image_bytes, vision_prompt, vision_client, vision_deployment)
 
         # 告警/裝飾類圖片跳過
         if vision_desc.strip().startswith("[SKIP]"):
@@ -396,8 +508,15 @@ def _process_pdf_chunk(
 # 5. 主要文件處理函式
 # ─────────────────────────────────────────────────────────────
 
-def process_file(di_client: DocumentIntelligenceClient, file_path: str,
-                 output_dir: str, vision_prompt: str, doc_type: str = "") -> None:
+def process_file(
+    di_client: DocumentIntelligenceClient,
+    file_path: str,
+    output_dir: str,
+    vision_prompt: str,
+    doc_type: str = "",
+    vision_client=None,
+    vision_deployment: str | None = None,
+) -> None:
     """
     使用 Azure Document Intelligence 解析單一 PDF/DOCX：
       - PDF  → 超過 _MAX_PAGES_PER_CHUNK 頁時自動拆分，分批送出後合併
@@ -436,6 +555,7 @@ def process_file(di_client: DocumentIntelligenceClient, file_path: str,
                 md, image_counter = _process_pdf_chunk(
                     di_client, chunk_path, chunk_fitz_doc,
                     image_save_dir, image_counter, vision_prompt, page_offset,
+                    vision_client, vision_deployment,
                 )
             finally:
                 chunk_fitz_doc.close()
@@ -448,7 +568,7 @@ def process_file(di_client: DocumentIntelligenceClient, file_path: str,
             print(f"\n  🗑️  已清除暫存區塊檔案")
 
     else:
-        # ── DOCX：直接送出，不做圖表裁切 ──────────────────────
+        # ── DOCX：直接送出，圖片從 ZIP 提取後交 Vision 描述 ──────
         with open(file_path, "rb") as f:
             poller = di_client.begin_analyze_document(
                 "prebuilt-layout",
@@ -457,11 +577,88 @@ def process_file(di_client: DocumentIntelligenceClient, file_path: str,
             )
         result = poller.result()
         _stats.di_pages += len(result.pages or [])
-        all_markdowns.append(result.content)
+        markdown_content: str = result.content
+
+        figures = result.figures or []
+        docx_images = _extract_docx_images(file_path)
+
+        if figures and docx_images:
+            print(f"  🖼️  Azure DI 偵測到 {len(figures)} 圖表 / DOCX 內嵌圖片 {len(docx_images)} 張")
+            figures_info = []
+            for i, figure in enumerate(figures):
+                if not figure.spans:
+                    continue
+                if i >= len(docx_images):
+                    print(f"  ⚠️  圖表 #{i+1} 超出內嵌圖片數量，跳過")
+                    break
+
+                span = figure.spans[0]
+                image_bytes = docx_images[i]
+
+                image_counter += 1
+                image_filename = f"image_{image_counter}.png"
+                (image_save_dir / image_filename).write_bytes(image_bytes)
+
+                print(f"  🔍 正在辨識圖片 {image_filename} ...")
+                vision_desc = describe_image(image_bytes, vision_prompt, vision_client, vision_deployment)
+
+                if vision_desc.strip().startswith("[SKIP]"):
+                    print(f"  ⏭️ 跳過告警/裝飾圖片: {image_filename}")
+                    (image_save_dir / image_filename).unlink(missing_ok=True)
+                    image_counter -= 1
+                    _stats.vision_skipped += 1
+                    continue
+
+                figures_info.append({
+                    "offset":      span.offset,
+                    "length":      span.length,
+                    "filename":    image_filename,
+                    "description": vision_desc,
+                })
+
+            # 逆序替換，保持偏移量正確
+            figures_info.sort(key=lambda x: x["offset"], reverse=True)
+            for fig in figures_info:
+                replacement = (
+                    f"\n> ### 🖼️ 圖表解析: {fig['filename']}\n"
+                    f"> {fig['description']}\n"
+                )
+                s = fig["offset"]
+                e = s + fig["length"]
+                markdown_content = markdown_content[:s] + replacement + markdown_content[e:]
+
+        elif docx_images:
+            # Azure DI 未偵測到圖表，但 DOCX 確實有嵌入圖片 → 直接從 ZIP 提取描述，附加至文末
+            print(f"  ⚠️  Azure DI 未回傳圖表資訊，改直接從 DOCX 提取 {len(docx_images)} 張內嵌圖片...")
+            appended_sections: list[str] = []
+            for i, image_bytes in enumerate(docx_images):
+                image_counter += 1
+                image_filename = f"image_{image_counter}.png"
+                (image_save_dir / image_filename).write_bytes(image_bytes)
+
+                print(f"  🔍 正在辨識圖片 {image_filename} ...")
+                vision_desc = describe_image(image_bytes, vision_prompt, vision_client, vision_deployment)
+
+                if vision_desc.strip().startswith("[SKIP]"):
+                    print(f"  ⏭️ 跳過告警/裝飾圖片: {image_filename}")
+                    (image_save_dir / image_filename).unlink(missing_ok=True)
+                    image_counter -= 1
+                    _stats.vision_skipped += 1
+                    continue
+
+                appended_sections.append(
+                    f"\n> ### 🖼️ 圖表解析: {image_filename}\n"
+                    f"> {vision_desc}\n"
+                )
+
+            if appended_sections:
+                markdown_content += "\n\n## 附件圖表\n" + "\n".join(appended_sections)
+
+        all_markdowns.append(markdown_content)
 
     # ── 合併所有區塊、轉換 HTML 表格並儲存 ──────────────────────
     markdown_content = "\n\n".join(all_markdowns)
-    markdown_content = _convert_html_tables(markdown_content)
+    # markdown_content = _convert_html_tables(markdown_content)
     final_md_path = output_dir_path / f"{file_id}.md"
 
     with open(final_md_path, "w", encoding="utf-8") as f:
@@ -475,8 +672,9 @@ def process_file(di_client: DocumentIntelligenceClient, file_path: str,
 # 6. 批次處理（與 parse_tenders.py 一致）
 # ─────────────────────────────────────────────────────────────
 
-def _print_stats() -> None:
+def _print_stats(model_label: str | None = None) -> None:
     """印出本次執行的費用與資源使用統計摘要。"""
+    _label = model_label or AZURE_DEPLOYMENT
     elapsed     = time.time() - _stats.start_time
     di_cost     = (_stats.di_pages / 1000) * _DI_PRICE_PER_1K_PAGES
     vision_cost = (
@@ -498,7 +696,7 @@ def _print_stats() -> None:
     print(f"  💰 預估費用       : ${di_cost:.4f} USD")
     print(f"     （{_stats.di_pages:,} 頁 × ${_DI_PRICE_PER_1K_PAGES}/千頁）")
     print()
-    print(f"  ── Azure OpenAI Vision ({AZURE_DEPLOYMENT}) ───────────────")
+    print(f"  ── Vision 模型 ({_label}) ───────────────")
     print(f"  🖼️  呼叫次數       : {_stats.vision_calls} 次  (保留 {vision_kept} / 跳過 {_stats.vision_skipped})")
     print(f"  🔤 Token 使用     : 輸入 {_stats.vision_input_tokens:,}  / 輸出 {_stats.vision_output_tokens:,}")
     print(f"  💰 預估費用       : ${vision_cost:.4f} USD")

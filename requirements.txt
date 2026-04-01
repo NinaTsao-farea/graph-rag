@@ -18,3 +18,8 @@ graphrag-vectors>=0.1.0   # GraphRAG 3.x 向量資料庫套件 (LanceDB 介面)
 Pillow>=10.0.0
 opencv-python-headless>=4.8.0  # 協助 Docling 處理複雜施工圖
 pymupdf>=1.24.0                 # Azure DI 版本用：從 PDF 頁面裁切圖表區域
+
+# --- Web 應用 ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9

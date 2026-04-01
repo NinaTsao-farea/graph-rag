@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>標案文件解析系統</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <h1>📄 標案文件解析系統</h1>
+      <p class="subtitle">Azure Document Intelligence + OpenAI Vision + GraphRAG</p>
+    </header>
+
+    <!-- Tab 切換 -->
+    <nav class="tab-bar">
+      <button class="tab-btn active" data-tab="upload">☁️ 上傳文件</button>
+      <button class="tab-btn" data-tab="parse">⚙️ 解析文件</button>
+      <button class="tab-btn" data-tab="index">🗂️ 建立索引</button>
+    </nav>
+
+    <!-- ═══════════════════════════════ Tab: 上傳文件 ═══════════════════════════════ -->
+    <section id="tab-upload" class="tab-panel active">
+      <div class="card">
+        <h2>上傳文件</h2>
+        <p class="hint">支援格式：PDF、Word（.doc/.docx）、Excel（.xls/.xlsx）、PowerPoint（.ppt/.pptx）</p>
+
+        <form id="upload-form">
+          <div class="form-row">
+            <label for="folder-name">資料夾名稱 <span class="required">*</span></label>
+            <input
+              type="text"
+              id="folder-name"
+              name="folder_name"
+              placeholder="例如：tender_2026_army"
+              autocomplete="off"
+              required
+            />
+            <span class="field-hint">僅允許字母、數字、底線、連字號與中文</span>
+          </div>
+
+          <div class="form-row">
+            <label for="doc-type">文件類型 <span class="required">*</span></label>
+            <select id="doc-type" name="doc_type" required>
+              <option value="" disabled selected>— 選擇類型 —</option>
+              <option value="government">government（政府標案）</option>
+              <option value="mixed_tenders">mixed_tenders（軍服標案）</option>
+              <option value="stip">stip（門市銷售指南）</option>
+            </select>
+          </div>
+
+          <div class="form-row">
+            <label for="file-input">選擇文件 <span class="required">*</span></label>
+            <div class="file-drop-zone" id="drop-zone">
+              <input
+                type="file"
+                id="file-input"
+                name="files"
+                multiple
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+              />
+              <span class="drop-label">拖曳到此處，或點擊選擇文件</span>
+            </div>
+            <ul id="selected-files-list" class="file-list"></ul>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" id="upload-btn" class="btn btn-primary">
+              ⬆️ 上傳
+            </button>
+          </div>
+        </form>
+
+        <!-- 上傳結果 -->
+        <div id="upload-result" class="result-block hidden">
+          <div id="upload-message" class="message"></div>
+          <div id="backup-notice" class="backup-notice hidden"></div>
+          <div id="folder-contents" class="folder-contents hidden">
+            <h3 id="folder-contents-title"></h3>
+            <ul id="folder-files-list"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════ Tab: 解析文件 ═══════════════════════════════ -->
+    <section id="tab-parse" class="tab-panel hidden">
+      <div class="card">
+        <h2>解析文件</h2>
+        <p class="hint">選擇要解析的資料夾與檔案，系統將呼叫 Azure Document Intelligence 進行解析。</p>
+
+        <div class="form-row">
+          <label for="parse-folder">選擇資料夾 <span class="required">*</span></label>
+          <div class="select-row">
+            <select id="parse-folder">
+              <option value="" disabled selected>— 載入中 —</option>
+            </select>
+            <button id="refresh-folders-btn" class="btn btn-icon" title="重新整理">🔄</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label for="parse-file">選擇檔案</label>
+          <select id="parse-file">
+            <option value="">全部（批次解析）</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label for="parse-model">AI 模型 <span class="required">*</span></label>
+          <select id="parse-model" required>
+            <option value="" disabled selected>— 載入中 —</option>
+          </select>
+          <span class="field-hint" id="parse-model-hint"></span>
+        </div>
+
+        <div class="form-actions">
+          <button id="parse-btn" class="btn btn-primary" disabled>
+            ▶️ 開始解析
+          </button>
+          <button id="stop-btn" class="btn btn-danger hidden">
+            ⏹ 中止連線
+          </button>
+        </div>
+      </div>
+
+      <!-- 即時 Log 串流 -->
+      <div class="card log-card">
+        <div class="log-header">
+          <h3>📋 解析進度</h3>
+          <div class="log-controls">
+            <label class="toggle-label">
+              <input type="checkbox" id="auto-scroll" checked />
+              自動捲動
+            </label>
+            <button id="clear-log-btn" class="btn btn-sm">清除</button>
+          </div>
+        </div>
+        <div id="log-status" class="log-status"></div>
+        <pre id="log-output" class="log-output"></pre>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════ Tab: 建立索引 ═══════════════════════════════ -->
+  <section id="tab-index" class="tab-panel hidden">
+    <div class="card">
+      <h2>建立 GraphRAG 索引</h2>
+      <p class="hint">選擇已解析完成的資料夾，執行 GraphRAG 建立文件知識圖譜索引。</p>
+
+      <div class="form-row">
+        <label for="index-folder">選擇資料夾 <span class="required">*</span></label>
+        <div class="select-row">
+          <select id="index-folder">
+            <option value="" disabled selected>— 載入中 —</option>
+          </select>
+          <button id="refresh-index-btn" class="btn btn-icon" title="重新整理">🔄</button>
+        </div>
+        <span class="field-hint" id="index-folder-hint"></span>
+      </div>
+
+      <div class="form-actions">
+        <button id="index-btn" class="btn btn-primary" disabled>
+          🗂️ 開始建立索引
+        </button>
+        <button id="index-stop-btn" class="btn btn-danger hidden">
+          ⏹ 中止連線
+        </button>
+      </div>
+    </div>
+
+    <!-- 即時 Log 串流 -->
+    <div class="card log-card">
+      <div class="log-header">
+        <h3>📋 索引進度</h3>
+        <div class="log-controls">
+          <label class="toggle-label">
+            <input type="checkbox" id="index-auto-scroll" checked />
+            自動捲動
+          </label>
+          <button id="index-clear-log-btn" class="btn btn-sm">清除</button>
+        </div>
+      </div>
+      <div id="index-log-status" class="log-status"></div>
+      <pre id="index-log-output" class="log-output"></pre>
+    </div>
+  </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

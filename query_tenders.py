@@ -34,8 +34,10 @@ load_dotenv()
 # ─────────────────────────────────────────────────────────────
 # 費用定價常數 (USD / 百萬 tokens) — 依實際模型定價調整
 # ─────────────────────────────────────────────────────────────
-_LLM_INPUT_PRICE_PER_1M  = 0.75   # GPT-5.4 mini 輸入 token
-_LLM_OUTPUT_PRICE_PER_1M = 4.50   # GPT-5.4 mini 輸出 token
+# _LLM_INPUT_PRICE_PER_1M  = 0.75   # GPT-5.4 mini 輸入 token
+# _LLM_OUTPUT_PRICE_PER_1M = 4.50   # GPT-5.4 mini 輸出 token
+_LLM_INPUT_PRICE_PER_1M  = 2.50   # GPT-5.4 輸入 token
+_LLM_OUTPUT_PRICE_PER_1M = 15.0   # GPT-5.4 輸出 token
 
 
 @dataclass
@@ -353,7 +355,7 @@ def _print_query_stats() -> None:
     if s.completion_time:
         print(f"  ℹ️  LLM 純計時間   : {s.completion_time:.2f} 秒")
     print()
-    print("  ── Azure OpenAI LLM ────────────────────────────")
+    print(f"  ── Azure OpenAI LLM {os.getenv('AZURE_OPENAI_DEPLOYMENT', 'gpt-4o')} ────────────")
     print(f"  LLM 呼叫次數      : {s.llm_calls}")
     print(f"  輸入 tokens        : {s.prompt_tokens:>10,}")
     if s.output_tokens:
@@ -363,7 +365,7 @@ def _print_query_stats() -> None:
         print(f"  💰 預估輸入費用     : ${in_cost:.6f} USD")
         print(f"  （輸出 tokens 不可用，輸出費用未計入）")
     print(bar)
-    print("  ⚠️  費用為估算唃，實際請查閱 Azure Portal 帳單")
+    print("  ⚠️  費用為估算，實際請查閱 Azure Portal 帳單")
     print(bar)
 
 

@@ -5,8 +5,8 @@ from graphrag.query.factory import get_local_search_engine, get_global_search_en
 from graphrag.config import load_config_from_yaml
 
 # ================= 配置區域 =================
-ROOT_DIR = "./projects/Tender_A"
-METHOD = "global" # "local" or "global"
+ROOT_DIR = "./ragtest/stip"
+METHOD = "local" # "local" or "global"
 
 # 對應 settings.yaml 中的模型名稱
 MODELS = {
@@ -15,8 +15,8 @@ MODELS = {
 }
 
 QUESTIONS = [
-    "本標案的主要工程範圍為何？",
-    "逾期竣工的每日罰則金額與上限是多少？",
+    "亞太客戶如果已經辦理 INP 續約，後續是否還能改走『客戶搬遷』？",
+    "請列出「有送市話免費分鐘數」的促銷方案，並說明其「適用對象與限制條件」。",
     # ... 其他問題 ...
 ]
 # ===========================================
