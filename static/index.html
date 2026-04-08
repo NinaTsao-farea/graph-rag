@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>標案文件解析系統</title>
+  <title>GraphRag Demo</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <div class="app-shell">
     <header class="app-header">
-      <h1>📄 標案文件解析系統</h1>
+      <h1>📄 標案文件 GraphRag 範例</h1>
       <p class="subtitle">Azure Document Intelligence + OpenAI Vision + GraphRAG</p>
     </header>
 
@@ -18,6 +18,7 @@
       <button class="tab-btn active" data-tab="upload">☁️ 上傳文件</button>
       <button class="tab-btn" data-tab="parse">⚙️ 解析文件</button>
       <button class="tab-btn" data-tab="index">🗂️ 建立索引</button>
+      <button class="tab-btn" data-tab="query">🔎 查詢</button>
     </nav>
 
     <!-- ═══════════════════════════════ Tab: 上傳文件 ═══════════════════════════════ -->
@@ -159,6 +160,14 @@
         <span class="field-hint" id="index-folder-hint"></span>
       </div>
 
+      <div class="form-row">
+        <label for="index-model">AI 模型 <span class="required">*</span></label>
+        <select id="index-model" required>
+          <option value="" disabled selected>— 載入中 —</option>
+        </select>
+        <span class="field-hint" id="index-model-hint"></span>
+      </div>
+
       <div class="form-actions">
         <button id="index-btn" class="btn btn-primary" disabled>
           🗂️ 開始建立索引
@@ -183,6 +192,83 @@
       </div>
       <div id="index-log-status" class="log-status"></div>
       <pre id="index-log-output" class="log-output"></pre>
+    </div>
+  </section>
+
+    <!-- ═══════════════════════════════ Tab: 查詢 ═══════════════════════════════ -->
+  <section id="tab-query" class="tab-panel hidden">
+    <div class="card">
+      <h2>🔎 GraphRAG 知識圖譜查詢</h2>
+      <p class="hint">對已建立索引的資料庫進行自然語氣查詢。</p>
+
+      <div class="form-row">
+        <label for="query-type">資料類型 <span class="required">*</span></label>
+        <div class="select-row">
+          <select id="query-type">
+            <option value="" disabled selected>— 載入中 —</option>
+          </select>
+          <button id="refresh-query-types-btn" class="btn btn-icon" title="重新整理">🔄</button>
+        </div>
+        <span class="field-hint" id="query-type-hint"></span>
+      </div>
+
+      <div class="form-row">
+        <label for="query-mode">搜索模式 <span class="required">*</span></label>
+        <select id="query-mode">
+          <option value="local" selected>🔍 局部搜索（特定細節）</option>
+          <option value="global">🌐 全域搜索（跨文件彙整）</option>
+        </select>
+        <span class="field-hint">局部：適合詢問標案細節；全域：適合跨文件趨勢彙整</span>
+      </div>
+
+      <div class="form-row">        <label for="query-model">AI 模型 <span class="required">*</span></label>
+        <select id="query-model" required>
+          <option value="" disabled selected>— 載入中 —</option>
+        </select>
+        <span class="field-hint" id="query-model-hint"></span>
+      </div>
+
+      <div class="form-row">        <label for="query-input">查詢問題 <span class="required">*</span></label>
+        <textarea
+          id="query-input"
+          rows="3"
+          placeholder="例如：請列出這份標案的題目與需求概要"
+          style="width:100%; resize:vertical; font-size:0.95rem; padding:8px; background:#1e2a3a; color:#d4e0ec; border:1px solid #3a5068; border-radius:6px;"
+        ></textarea>
+      </div>
+
+      <div class="form-row">
+        <label>展示選項</label>
+        <label class="toggle-label" style="margin-top:6px">
+          <input type="checkbox" id="query-show-context" />
+          顯示參考內容（context_data）
+        </label>
+      </div>
+
+      <div class="form-actions">
+        <button id="query-btn" class="btn btn-primary" disabled>
+          🔎 開始查詢
+        </button>
+        <button id="query-stop-btn" class="btn btn-danger hidden">
+          ⏹ 中止查詢
+        </button>
+      </div>
+    </div>
+
+    <!-- 即時結果串流 -->
+    <div class="card log-card">
+      <div class="log-header">
+        <h3>💬 查詢結果</h3>
+        <div class="log-controls">
+          <label class="toggle-label">
+            <input type="checkbox" id="query-auto-scroll" checked />
+            自動捲動
+          </label>
+          <button id="query-clear-log-btn" class="btn btn-sm">清除</button>
+        </div>
+      </div>
+      <div id="query-log-status" class="log-status"></div>
+      <pre id="query-log-output" class="log-output"></pre>
     </div>
   </section>
   </div>

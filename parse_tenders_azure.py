@@ -6,6 +6,7 @@ import argparse
 import shutil
 import time
 import zipfile
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +31,13 @@ AZURE_DI_KEY = os.getenv("AZURE_COGNITIVE_SERVICES_KEY")
 # 2. Vision 模型設定（可在解析時手動選擇）
 # ─────────────────────────────────────────────────────────────
 
+# ── 費用估算預設值 (USD) — 可透過 .env AZURE_OPENAI_PRICE_INPUT[_N] 逐部署覆寫 ──
+_DI_PRICE_PER_1K_PAGES      = 1.50   # Azure DI prebuilt-layout / 千頁
+_VISION_INPUT_PRICE_PER_1M  = 0.75   # Azure Vision 輸入 token 預設 / 百萬
+_VISION_OUTPUT_PRICE_PER_1M = 4.50   # Azure Vision 輸出 token 預設 / 百萬
+_GEMINI_INPUT_PRICE_PER_1M  = float(os.getenv("GEMINI_PRICE_INPUT",  "0.10"))  # Gemini Flash 輸入 token / 百萬
+_GEMINI_OUTPUT_PRICE_PER_1M = float(os.getenv("GEMINI_PRICE_OUTPUT", "0.40"))  # Gemini Flash 輸出 token / 百萬
+
 def _load_azure_models() -> dict[str, dict]:
     """
     自動掃描 .env 中的 Azure 部署設定：
@@ -53,6 +61,8 @@ def _load_azure_models() -> dict[str, dict]:
             "endpoint":   os.getenv(f"AZURE_OPENAI_ENDPOINT{sfx}",   os.getenv("AZURE_OPENAI_ENDPOINT")),
             "api_version":os.getenv(f"AZURE_OPENAI_API_VERSION{sfx}", os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")),
             "deployment": dep,
+            "input_price_per_1m":  float(os.getenv(f"AZURE_OPENAI_PRICE_INPUT{sfx}",  str(_VISION_INPUT_PRICE_PER_1M))),
+            "output_price_per_1m": float(os.getenv(f"AZURE_OPENAI_PRICE_OUTPUT{sfx}", str(_VISION_OUTPUT_PRICE_PER_1M))),
         }
     return models
 
@@ -64,6 +74,8 @@ VISION_MODELS["gemini"] = {
     "api_key":    os.getenv("GEMINI_API_KEY", ""),
     "base_url":   os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta/openai/"),
     "deployment": os.getenv("GEMINI_MODEL", "gemini-3.0-flash"),
+    "input_price_per_1m":  _GEMINI_INPUT_PRICE_PER_1M,
+    "output_price_per_1m": _GEMINI_OUTPUT_PRICE_PER_1M,
 }
 
 # 第一個 Azure 部署為預設
@@ -162,12 +174,7 @@ _MARGIN_INCH = 0.7
 # 超過此頁數自動拆分為多個區塊，避免 Azure DI 請求超時
 _MAX_PAGES_PER_CHUNK = 50
 
-# ─────────────────────────────────────────────────────────────
-# 費用估算常數 (USD) — 依 Azure 定價頁更新
-# ─────────────────────────────────────────────────────────────
-_DI_PRICE_PER_1K_PAGES      = 1.50   # Document Intelligence prebuilt-layout / 千頁
-_VISION_INPUT_PRICE_PER_1M  = 0.75   # Vision 模型輸入 token / 百萬（依實際部署定價調整）
-_VISION_OUTPUT_PRICE_PER_1M = 4.50   # Vision 模型輸出 token / 百萬（依實際部署定價調整）
+# 費用估算常數已移至「# 2. Vision 模型設定」區段，各模型獨立定價
 
 
 @dataclass
@@ -661,6 +668,20 @@ def process_file(
     # markdown_content = _convert_html_tables(markdown_content)
     final_md_path = output_dir_path / f"{file_id}.md"
 
+    # ── 插入文件元數據（讓 AI 識別文件新舊與來源）──────────────────
+    _doc_desc = next((t["description"] for t in DOC_TASKS if t["doc_type"] == doc_type), doc_type)
+    _parse_date = datetime.now().strftime("%Y-%m-%d")
+    _file_mtime = datetime.fromtimestamp(file_path.stat().st_mtime).strftime("%Y-%m-%d")
+    _metadata_header = (
+        f"---\n"
+        f"來源檔案: {file_path.name}\n"
+        f"文件類型: {doc_type} ({_doc_desc})\n"
+        f"原始修改日期: {_file_mtime}\n"
+        f"解析日期: {_parse_date}\n"
+        f"---\n\n"
+    )
+    markdown_content = _metadata_header + markdown_content
+
     with open(final_md_path, "w", encoding="utf-8") as f:
         f.write(markdown_content)
     _stats.output_total_bytes += len(markdown_content.encode("utf-8"))
@@ -672,14 +693,17 @@ def process_file(
 # 6. 批次處理（與 parse_tenders.py 一致）
 # ─────────────────────────────────────────────────────────────
 
-def _print_stats(model_label: str | None = None) -> None:
+def _print_stats(model_label: str | None = None, model_id: str | None = None) -> None:
     """印出本次執行的費用與資源使用統計摘要。"""
     _label = model_label or AZURE_DEPLOYMENT
+    _mcfg  = VISION_MODELS.get(model_id or DEFAULT_VISION_MODEL_ID, {})
+    _in_p  = _mcfg.get("input_price_per_1m",  _VISION_INPUT_PRICE_PER_1M)
+    _out_p = _mcfg.get("output_price_per_1m", _VISION_OUTPUT_PRICE_PER_1M)
     elapsed     = time.time() - _stats.start_time
     di_cost     = (_stats.di_pages / 1000) * _DI_PRICE_PER_1K_PAGES
     vision_cost = (
-        (_stats.vision_input_tokens  / 1_000_000) * _VISION_INPUT_PRICE_PER_1M +
-        (_stats.vision_output_tokens / 1_000_000) * _VISION_OUTPUT_PRICE_PER_1M
+        (_stats.vision_input_tokens  / 1_000_000) * _in_p +
+        (_stats.vision_output_tokens / 1_000_000) * _out_p
     )
     total_cost   = di_cost + vision_cost
     vision_kept  = _stats.vision_calls - _stats.vision_skipped

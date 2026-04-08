@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import queue
 import re
 import shutil
@@ -26,20 +27,43 @@ from pydantic import BaseModel
 # ─────────────────────────────────────────────────────────────
 import parse_tenders_azure as _pta
 import index_tenders as _it
+import query_tenders as _qt
 
 # ─────────────────────────────────────────────────────────────
 # GraphRAG 索引模型開隢（指向 settings.yaml 模板）
+# 自動扫描 .env 中 AZURE_OPENAI_DEPLOYMENT[_N]，每個部署獨立建立一筆↳azure_{{dep}}
+# settings 模板路徑順序：AZURE_INDEX_SETTINGS[_N] > ragtest/settings[_N].yaml > ragtest/settings.yaml
 # ─────────────────────────────────────────────────────────────
-INDEX_MODEL_PROFILES: dict[str, dict] = {
-    "azure": {
-        "label": "Azure OpenAI（預設）",
-        "template": Path("./ragtest/settings.yaml"),
-    },
-    "gemini": {
-        "label": "Google Gemini",
+
+def _load_index_model_profiles() -> dict[str, dict]:
+    profiles: dict[str, dict] = {}
+    suffixes = [""] + [f"_{i}" for i in range(2, 10)]
+    for sfx in suffixes:
+        dep = os.getenv(f"AZURE_OPENAI_DEPLOYMENT{sfx}")
+        if not dep:
+            if sfx:
+                break
+            continue
+        key = f"azure_{dep}"
+        # 模板選擇順序：自訂環境變數 > ragtest/settings{sfx}.yaml > ragtest/settings.yaml
+        default_tpl = Path(f"./ragtest/settings{sfx}.yaml") if sfx else Path("./ragtest/settings.yaml")
+        custom_tpl  = os.getenv(f"AZURE_INDEX_SETTINGS{sfx}")
+        tpl_path    = Path(custom_tpl) if custom_tpl else default_tpl
+        if sfx and not tpl_path.exists():
+            tpl_path = Path("./ragtest/settings.yaml")  # 共用預設
+        profiles[key] = {
+            "label":    f"Azure {dep}",
+            "template": tpl_path,
+        }
+    profiles["gemini"] = {
+        "label":    "Google Gemini",
         "template": Path("./settings_gemini.yaml"),
-    },
-}
+    }
+    return profiles
+
+
+INDEX_MODEL_PROFILES: dict[str, dict] = _load_index_model_profiles()
+_FIRST_AZURE_KEY = next((k for k in INDEX_MODEL_PROFILES if k.startswith("azure_")), "gemini")
 
 # ─────────────────────────────────────────────────────────────
 # 常數
@@ -348,8 +372,9 @@ def _run_parse(folder_name: str, file_name: str | None, log_queue: queue.Queue, 
             _do_parse(folder_name, file_name, log_queue, model_id)
     except Exception as e:
         log_queue.put(f"❌ 未預期錯誤: {e}")
+        returncode = -1
     finally:
-        log_queue.put(None)  # sentinel
+        log_queue.put(("__done__", returncode))  # sentinel 帶返回碼
 
 
 def _do_parse(folder_name: str, file_name: str | None, log_queue: queue.Queue, model_id: str | None = None) -> None:
@@ -434,7 +459,7 @@ def _do_parse(folder_name: str, file_name: str | None, log_queue: queue.Queue, m
             print(f"❌ 處理 {file_path.name} 失敗: {e}")
             pta._stats.files_failed += 1
 
-    pta._print_stats(model_label)
+    pta._print_stats(model_label, model_id)
     print("\n✅ 解析任務完成！")
 
 
@@ -578,7 +603,7 @@ def _run_index(folder_name: str, log_queue: queue.Queue, model_id: str | None = 
     settings_path = root / "settings.yaml"
 
     # 依選擇的模型開隢決定 settings.yaml 來源
-    profile = INDEX_MODEL_PROFILES.get(model_id or "azure") or INDEX_MODEL_PROFILES["azure"]
+    profile = INDEX_MODEL_PROFILES.get(model_id or _FIRST_AZURE_KEY) or INDEX_MODEL_PROFILES[_FIRST_AZURE_KEY]
     template = profile["template"]
     label = profile["label"]
 
@@ -638,7 +663,7 @@ def _run_index(folder_name: str, log_queue: queue.Queue, model_id: str | None = 
 
         # 輸出索引統計摘要（重導 stdout 至 queue）
         with redirect_stdout(QueueWriter()):
-            _it._print_index_stats(root, wall, returncode)
+            _it._print_index_stats(root, wall, returncode, model_id)
 
     except Exception as e:
         log_queue.put(f"❌ 未預期錯誤: {e}")
@@ -662,7 +687,16 @@ async def _sse_index_generator(folder_name: str, model_id: str | None = None) ->
                 continue
 
             if msg is None:
+                # 舊格式相容
                 yield "event: done\ndata: done\n\n"
+                break
+
+            if isinstance(msg, tuple) and msg[0] == "__done__":
+                rc = msg[1]
+                if rc == 0:
+                    yield "event: done\ndata: done\n\n"
+                else:
+                    yield f"event: error\ndata: exit {rc}\n\n"
                 break
 
             safe = msg.replace("\n", " | ")
@@ -697,6 +731,118 @@ async def index_stream(req: IndexRequest):
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# 查詢 API
+# ─────────────────────────────────────────────────────────────
+
+class QueryRequest(BaseModel):
+    doc_type: str = "default"
+    mode: str = "local"
+    query: str
+    show_context: bool = False
+    model_id: str | None = None
+
+
+@app.get("/api/query-models")
+async def list_query_models():
+    """列出可用 Query AI 模型（比照 /api/models）。"""
+    result = []
+    for mid, cfg in _qt.QUERY_MODELS.items():
+        has_key = bool(cfg.get("chat") and getattr(cfg["chat"], "api_key", None)
+                       and cfg["chat"].api_key != "your-api-key-here")
+        result.append({
+            "id":        mid,
+            "label":     cfg["label"],
+            "available": has_key,
+        })
+    return result
+
+
+@app.get("/api/query-types")
+async def list_query_types():
+    """列出可查詢的索引目錄（只回傳 lancedb 非空的）。"""
+    result = []
+    for type_name, output_dir in _qt.DOC_INDEX_ROOTS.items():
+        lancedb = Path(output_dir) / "lancedb"
+        result.append({
+            "id":        type_name,
+            "label":     {"government":    "government（政府標案）",
+                          "stip":          "stip（門市銷售指南）",
+                          "mixed_tenders": "mixed_tenders（軍服標案）",
+                          "default":       "default（通用）"}.get(type_name, type_name),
+            "available": lancedb.exists() and any(lancedb.iterdir()),
+        })
+    return result
+
+
+@app.post("/api/query")
+async def run_query(req: QueryRequest):
+    """
+    執行 GraphRAG 查詢並以 SSE 串流回傳結果。
+    使用 AsyncGenerator 推送：進度提示 → 回答正文 → done。
+    """
+    async def _stream() -> AsyncGenerator[str, None]:
+        try:
+            input_dir = _qt.DOC_INDEX_ROOTS.get(req.doc_type)
+            if not input_dir:
+                yield f"data: ❌ 不支援的 doc_type: {req.doc_type}\n\n"
+                yield "event: error\ndata: invalid type\n\n"
+                return
+
+            lancedb = Path(input_dir) / "lancedb"
+            if not lancedb.exists() or not any(lancedb.iterdir()):
+                yield f"data: ❌ {req.doc_type} 尚未建立索引，請先執行索引建立\n\n"
+                yield "event: error\ndata: not indexed\n\n"
+                return
+
+            mode_label = "🔍 局部搜索" if req.mode == "local" else "🌐 全域搜索"
+            yield f"data: {mode_label}：{req.query}\n\n"
+            yield f"data: 📂 索引目錄：{input_dir}\n\n"
+            yield ": heartbeat\n\n"
+
+            # 建立搜索引擎（CPU 密集，放入執行緒）
+            loop = asyncio.get_event_loop()
+            local_engine, global_engine = await loop.run_in_executor(
+                _executor, _qt.build_engines, input_dir, req.doc_type, req.model_id
+            )
+            yield f"data: ✅ 索引載入完成，開始查詢…\n\n"
+            yield ": heartbeat\n\n"
+
+            # 執行查詢（async）
+            if req.mode == "local":
+                result = await _qt.run_local_search(local_engine, req.query, req.show_context, req.model_id)
+            else:
+                result = await _qt.run_global_search(global_engine, req.query, req.show_context, req.model_id)
+
+            # 推送答案（按行拆分以利前端逐行顯示）
+            yield f"data: \n\n"
+            yield f"data: ━━━ 查詢結果 ━━━\n\n"
+            for line in result.splitlines():
+                safe = line.replace("\n", " ")
+                yield f"data: {safe}\n\n"
+
+            # 費用摘要（重導 _print_query_stats stdout）
+            yield f"data: \n\n"
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                _qt._print_query_stats()
+            for line in buf.getvalue().splitlines():
+                if line.strip():
+                    yield f"data: {line}\n\n"
+
+            yield "event: done\ndata: done\n\n"
+
+        except Exception as e:
+            yield f"data: ❌ 查詢失敗：{e}\n\n"
+            yield "event: error\ndata: exception\n\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

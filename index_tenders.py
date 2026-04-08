@@ -12,6 +12,7 @@ GraphRAG Index 包裝器
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -19,15 +20,45 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # ─────────────────────────────────────────────────────────────
-# 費用定價常數 (USD / 百萬 tokens) — 請依實際模型定價更新
+# 費用定價常數 (USD / 百萬 tokens)
+# 復用 parse_tenders_azure.py 已在 .env 設定的同一組鍵値，不需重複設定：
+#   Azure LLM  → AZURE_OPENAI_PRICE_INPUT / AZURE_OPENAI_PRICE_OUTPUT
+#   Gemini LLM → GEMINI_PRICE_INPUT / GEMINI_PRICE_OUTPUT
+#   Embedding  → AZURE_EMBED_PRICE（独立鍵値，預設 $0.13/M）
 # ─────────────────────────────────────────────────────────────
-# _LLM_INPUT_PRICE_PER_1M   = 0.75    # GPT-5.4 mini 輸入 token
-# _LLM_OUTPUT_PRICE_PER_1M  = 4.50    # GPT-5.4 mini 輸出 token
-# _EMBED_PRICE_PER_1M       = 0.13    # text-embedding-3-large
-_LLM_INPUT_PRICE_PER_1M   = 2.50    # GPT-5.4 輸入 token
-_LLM_OUTPUT_PRICE_PER_1M  = 15.0    # GPT-5.4 輸出 token
-_EMBED_PRICE_PER_1M       = 0.13    # text-embedding-3-large
+
+# 各 INDEX_MODEL_PROFILES 的 model_id 對應定價
+# 比照 parse_tenders_azure.py _load_azure_models() 自動扫描 DEPLOYMENT[_N]
+def _load_index_pricing() -> dict[str, dict]:
+    pricing: dict[str, dict] = {}
+    suffixes = [""] + [f"_{i}" for i in range(2, 10)]
+    for sfx in suffixes:
+        dep = os.getenv(f"AZURE_OPENAI_DEPLOYMENT{sfx}")
+        if not dep:
+            if sfx:
+                break
+            continue
+        key = f"azure_{dep}"
+        pricing[key] = {
+            "llm_input":  float(os.getenv(f"AZURE_OPENAI_PRICE_INPUT{sfx}",  "2.50")),
+            "llm_output": float(os.getenv(f"AZURE_OPENAI_PRICE_OUTPUT{sfx}", "15.00")),
+            "embed":      float(os.getenv("AZURE_EMBED_PRICE",               "0.13")),
+        }
+    pricing["gemini"] = {
+        "llm_input":  float(os.getenv("GEMINI_PRICE_INPUT",  "0.10")),
+        "llm_output": float(os.getenv("GEMINI_PRICE_OUTPUT", "0.40")),
+        "embed":      float(os.getenv("GEMINI_EMBED_PRICE",  "0.00")),
+    }
+    return pricing
+
+
+_MODEL_PRICING: dict[str, dict] = _load_index_pricing()
+# 未知 model_id 的退回值（第一個 Azure 或 gemini）
+_DEFAULT_PRICING = next(iter(_MODEL_PRICING.values()))
 
 
 def _parse_log_stats(log_path: Path) -> dict:
@@ -87,8 +118,35 @@ def _parse_log_stats(log_path: Path) -> dict:
     }
 
 
-def _print_index_stats(root: Path, wall_seconds: float, returncode: int) -> None:
-    """讀取 stats.json + log，印出完整摘要。"""
+def _read_model_names_from_settings(root: Path) -> tuple[str, str]:
+    """從 settings.yaml 讀取 completion / embedding 模型名稱，回傳 (llm_model, embed_model)。"""
+    settings_path = root / "settings.yaml"
+    llm_model = embed_model = "(未知)"
+    if not settings_path.exists():
+        return llm_model, embed_model
+    try:
+        raw = settings_path.read_text(encoding="utf-8")
+        # 過濾注解行，避免匹配到檔案中被 # 注解的舊設定
+        text = "\n".join(
+            line for line in raw.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        m = re.search(r"completion_models:.*?(?<!\w)model:\s*(\S+)", text, re.DOTALL)
+        if m:
+            llm_model = m.group(1)
+        m = re.search(r"embedding_models:.*?(?<!\w)model:\s*(\S+)", text, re.DOTALL)
+        if m:
+            embed_model = m.group(1)
+    except Exception:
+        pass
+    return llm_model, embed_model
+
+
+def _print_index_stats(root: Path, wall_seconds: float, returncode: int, model_id: str | None = None) -> None:
+    """讀取 stats.json + log，印出完整摘要。model_id 對應 INDEX_MODEL_PROFILES 的鍵值。"""
+
+    pricing = _MODEL_PRICING.get(model_id or "azure", _DEFAULT_PRICING)
+    llm_model, embed_model = _read_model_names_from_settings(root)
 
     # ── stats.json ────────────────────────────────────────────
     stats_path = root / "output" / "stats.json"
@@ -116,9 +174,9 @@ def _print_index_stats(root: Path, wall_seconds: float, returncode: int) -> None
     llm_out = llm.get("completion_tokens", 0)
     emb_in  = embed.get("prompt_tokens",   0)
 
-    llm_cost  = (llm_in / 1_000_000) * _LLM_INPUT_PRICE_PER_1M + \
-                (llm_out / 1_000_000) * _LLM_OUTPUT_PRICE_PER_1M
-    emb_cost  = (emb_in / 1_000_000) * _EMBED_PRICE_PER_1M
+    llm_cost  = (llm_in  / 1_000_000) * pricing["llm_input"] + \
+                (llm_out / 1_000_000) * pricing["llm_output"]
+    emb_cost  = (emb_in  / 1_000_000) * pricing["embed"]
     total_cost = llm_cost + emb_cost
 
     # ── status ────────────────────────────────────────────────
@@ -131,6 +189,8 @@ def _print_index_stats(root: Path, wall_seconds: float, returncode: int) -> None
     print(bar)
     print(f"  狀態             : {status}")
     print(f"  處理文件數       : {num_documents}")
+    print(f"  🤖 LLM 模型       : {llm_model}")
+    print(f"  🔢 Embedding 模型 : {embed_model}")
     w = int(wall_seconds)
     print(f"  ⏱️  總掛牆時間      : {wall_seconds:.1f} 秒  "
           f"({w // 3600}h {(w % 3600) // 60}m {w % 60}s)")
@@ -145,18 +205,20 @@ def _print_index_stats(root: Path, wall_seconds: float, returncode: int) -> None
             print(f"     {wf:<35s} {sec:>8.1f} 秒")
 
     print()
-    print("  ── Azure OpenAI LLM ──────────────────────────────────")
+    print(f"  ── Azure OpenAI LLM ({llm_model}) ──────────────────────")
     print(f"  呼叫次數          : {llm.get('attempted', 0):,}  (失敗 {llm.get('failed', 0):,})")
     print(f"  輸入 tokens       : {llm_in:>14,}")
     print(f"  輸出 tokens       : {llm_out:>14,}")
     print(f"  總計 tokens       : {llm_in + llm_out:>14,}")
     print(f"  💰 預估費用        : ${llm_cost:.4f} USD")
+    print(f"     （輸入 ${pricing['llm_input']}/M, 輸出 ${pricing['llm_output']}/M）")
 
     print()
-    print("  ── Azure OpenAI Embedding ────────────────────────────")
+    print(f"  ── Azure OpenAI Embedding ({embed_model}) ─────────")
     print(f"  呼叫次數          : {embed.get('attempted', 0):,}  (失敗 {embed.get('failed', 0):,})")
     print(f"  輸入 tokens       : {emb_in:>14,}")
     print(f"  💰 預估費用        : ${emb_cost:.4f} USD")
+    print(f"     （${pricing['embed']}/M）")
 
     print()
     print(f"  💵 本次總預估費用  : ${total_cost:.4f} USD")

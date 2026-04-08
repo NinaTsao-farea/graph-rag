@@ -21,6 +21,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
     if (target === 'parse') loadParseFolders();
     if (target === 'index') loadIndexFolders();
+    if (target === 'query') loadQueryTypes();
   });
 });
 
@@ -416,6 +417,8 @@ if (document.getElementById('tab-parse').classList.contains('active')) {
 
 const indexFolderSelect  = document.getElementById('index-folder');
 const refreshIndexBtn    = document.getElementById('refresh-index-btn');
+const indexModelSelect   = document.getElementById('index-model');
+const indexModelHint     = document.getElementById('index-model-hint');
 const indexBtn           = document.getElementById('index-btn');
 const indexStopBtn       = document.getElementById('index-stop-btn');
 const indexFolderHint    = document.getElementById('index-folder-hint');
@@ -432,11 +435,14 @@ async function loadIndexFolders() {
   indexFolderSelect.innerHTML = '<option value="" disabled selected>— 載入中 —</option>';
   indexBtn.disabled = true;
 
+  await Promise.all([_loadIndexFoldersData(), loadIndexModels()]);
+}
+
+async function _loadIndexFoldersData() {
+  indexFolderSelect.innerHTML = '<option value="" disabled selected>— 選擇資料夾 —</option>';
   try {
     const res  = await fetch('/api/index-folders');
     const data = await res.json();
-
-    indexFolderSelect.innerHTML = '<option value="" disabled selected>— 選擇資料夾 —</option>';
     if (!data.length) {
       indexFolderSelect.innerHTML = '<option value="" disabled selected>（尚無可建立索引的資料夾）</option>';
       return;
@@ -452,6 +458,37 @@ async function loadIndexFolders() {
     });
   } catch (err) {
     indexFolderSelect.innerHTML = '<option value="" disabled selected>（載入失敗）</option>';
+  }
+}
+
+// ── 載入 GraphRAG 索引模型清單 ─────────────────────────
+
+async function loadIndexModels() {
+  indexModelSelect.innerHTML = '<option value="" disabled selected>— 載入中 —</option>';
+
+  try {
+    const res  = await fetch('/api/index-models');
+    const data = await res.json();
+
+    indexModelSelect.innerHTML = '';
+    let hasSelected = false;
+    data.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value       = m.id;
+      opt.textContent = m.available ? m.label : `${m.label}  ⚠️（無 settings 模板）`;
+      opt.disabled    = !m.available;
+      if (!hasSelected && m.available) { opt.selected = true; hasSelected = true; }
+      indexModelSelect.appendChild(opt);
+    });
+
+    if (!hasSelected) {
+      indexModelHint.textContent = '⚠️ 沒有可用的索引模型，請檢查 settings.yaml 模板檔是否存在';
+      indexModelHint.style.color = 'var(--warning)';
+    } else {
+      indexModelHint.textContent = '';
+    }
+  } catch (err) {
+    indexModelSelect.innerHTML = '<option value="" disabled selected>（載入失敗）</option>';
   }
 }
 
@@ -484,6 +521,8 @@ indexBtn.addEventListener('click', async () => {
   const folderName = indexFolderSelect.value;
   if (!folderName) return;
 
+  const modelId = indexModelSelect.value || null;
+
   if (activeIndexAbort) { activeIndexAbort.abort(); activeIndexAbort = null; }
 
   indexLogOutput.textContent = '';
@@ -504,7 +543,7 @@ indexBtn.addEventListener('click', async () => {
     const res = await fetch('/api/index/stream', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ folder_name: folderName }),
+      body:    JSON.stringify({ folder_name: folderName, model_id: modelId }),
       signal:  abortController.signal,
     });
 
@@ -541,8 +580,11 @@ indexBtn.addEventListener('click', async () => {
         } else if (line.startsWith('event: done')) {
           setIndexLogStatus('✅ 索引建立完成！', 'done');
           resetIndexUI();
-          return;
-        }
+          return;        } else if (line.startsWith('event: error')) {
+          // 下一行會是 data: exit N，狀態已願示在 log。
+          setIndexLogStatus('\u274c 索引建立失敗（請查看上方 Log）', 'error');
+          resetIndexUI();
+          return;        }
       }
     }
     setIndexLogStatus('✅ 索引建立完成！', 'done');
@@ -563,3 +605,168 @@ function resetIndexUI() {
   indexStopBtn.classList.add('hidden');
   loadIndexFolders();
 }
+
+// ═══════════════════════════════ 查詢 Tab ═══════════════════════════════
+
+const queryTypeSelect   = document.getElementById('query-type');
+const queryTypeHint     = document.getElementById('query-type-hint');
+const queryModeSelect   = document.getElementById('query-mode');
+const queryModelSelect  = document.getElementById('query-model');
+const queryModelHint    = document.getElementById('query-model-hint');
+const queryInput        = document.getElementById('query-input');
+const queryShowContext  = document.getElementById('query-show-context');
+const queryBtn          = document.getElementById('query-btn');
+const queryStopBtn      = document.getElementById('query-stop-btn');
+const queryLogStatus    = document.getElementById('query-log-status');
+const queryLogOutput    = document.getElementById('query-log-output');
+const queryAutoScroll   = document.getElementById('query-auto-scroll');
+const queryClearLogBtn  = document.getElementById('query-clear-log-btn');
+const refreshQueryTypesBtn = document.getElementById('refresh-query-types-btn');
+
+let activeQueryAbort = null;
+
+function setQueryLogStatus(msg, state) {
+  queryLogStatus.textContent = msg;
+  queryLogStatus.className = 'log-status ' + (state || '');
+}
+
+function appendQueryLog(text) {
+  if (!text || text.trim() === '') return;
+  queryLogOutput.textContent += text + '\n';
+  if (queryAutoScroll.checked) queryLogOutput.scrollTop = queryLogOutput.scrollHeight;
+}
+
+queryClearLogBtn.addEventListener('click', () => { queryLogOutput.textContent = ''; setQueryLogStatus('', ''); });
+refreshQueryTypesBtn.addEventListener('click', loadQueryTypes);
+
+async function loadQueryTypes() {
+  try {
+    const [typesData, modelsData] = await Promise.all([
+      fetch('/api/query-types').then(r => r.json()),
+      fetch('/api/query-models').then(r => r.json()),
+    ]);
+    queryTypeSelect.innerHTML = '<option value="" disabled selected>— 選擇資料類型 —</option>';
+    typesData.forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t.id;
+      opt.textContent = t.available ? t.label : `${t.label}  ⚠️ 尚未索引`;
+      opt.disabled = !t.available;
+      queryTypeSelect.appendChild(opt);
+    });
+    const firstType = typesData.find(t => t.available);
+    if (firstType) { queryTypeSelect.value = firstType.id; }
+
+    queryModelSelect.innerHTML = '';
+    modelsData.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.available ? m.label : `${m.label}  ⚠️ 不可用`;
+      opt.disabled = !m.available;
+      queryModelSelect.appendChild(opt);
+      if (m.available && !queryModelSelect.value) queryModelSelect.value = m.id;
+    });
+    const firstModel = modelsData.find(m => m.available);
+    if (firstModel) queryModelHint.textContent = '';
+    else queryModelHint.textContent = '⚠️ 無可用模型';
+
+    updateQueryBtn();
+  } catch (e) {
+    queryTypeHint.textContent = '⚠️ 無法載入索引清單';
+  }
+}
+
+function updateQueryBtn() {
+  const ready = queryTypeSelect.value && queryModelSelect.value && queryInput.value.trim().length > 0;
+  queryBtn.disabled = !ready;
+}
+
+queryTypeSelect.addEventListener('change', updateQueryBtn);
+queryModelSelect.addEventListener('change', updateQueryBtn);
+queryInput.addEventListener('input', updateQueryBtn);
+
+queryStopBtn.addEventListener('click', () => {
+  if (activeQueryAbort) { activeQueryAbort.abort(); activeQueryAbort = null; }
+});
+
+queryBtn.addEventListener('click', async () => {
+  const docType     = queryTypeSelect.value;
+  const mode        = queryModeSelect.value;
+  const modelId     = queryModelSelect.value;
+  const queryText   = queryInput.value.trim();
+  const showContext = queryShowContext.checked;
+
+  if (!docType || !queryText) { setQueryLogStatus('請選擇資料類型並輸入查詢問題', 'error'); return; }
+
+  queryLogOutput.textContent = '';
+  setQueryLogStatus('🔄 查詢中…', 'running');
+  queryBtn.disabled = true;
+  queryStopBtn.classList.remove('hidden');
+  activeQueryAbort = new AbortController();
+
+  try {
+    const res = await fetch('/api/query', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ doc_type: docType, mode, query: queryText, show_context: showContext, model_id: modelId }),
+      signal:  activeQueryAbort.signal,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      setQueryLogStatus(`❌ 錯誤：${err.detail}`, 'error');
+      return;
+    }
+
+    setQueryLogStatus('🔄 查詢中…', 'running');
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let   buffer  = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const msg = line.slice(6);
+          if (msg === 'done') {
+            setQueryLogStatus('✅ 查詢完成！', 'done');
+            resetQueryUI();
+            return;
+          }
+          appendQueryLog(msg);
+        } else if (line.startsWith('event: done')) {
+          setQueryLogStatus('✅ 查詢完成！', 'done');
+          resetQueryUI();
+          return;
+        } else if (line.startsWith('event: error')) {
+          setQueryLogStatus('❌ 查詢失敗（請查看上方 Log）', 'error');
+          resetQueryUI();
+          return;
+        }
+      }
+    }
+    setQueryLogStatus('✅ 查詢完成！', 'done');
+
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      setQueryLogStatus(`❌ 連線錯誤：${err.message}`, 'error');
+      appendQueryLog(`❌ 錯誤：${err.message}`);
+    }
+  } finally {
+    resetQueryUI();
+  }
+});
+
+function resetQueryUI() {
+  activeQueryAbort = null;
+  queryBtn.disabled = false;
+  queryStopBtn.classList.add('hidden');
+  updateQueryBtn();
+}
+
