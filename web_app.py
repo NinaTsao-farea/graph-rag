@@ -26,8 +26,10 @@ from pydantic import BaseModel
 # 延遲載入 parse_tenders_azure，避免 app 啟動時就觸發 Azure client 初始化
 # ─────────────────────────────────────────────────────────────
 import parse_tenders_azure as _pta
-import index_tenders as _it
+import parse_tenders_local as _ptl
+import index_tenders_azure as _it
 import query_tenders as _qt
+from doc_tasks import DOC_TASKS, get_doc_type_map, get_dest, get_index_root, model_id_to_camp, CAMP_NAMES
 
 # ─────────────────────────────────────────────────────────────
 # GraphRAG 索引模型開隢（指向 settings.yaml 模板）
@@ -131,7 +133,7 @@ def _backup_if_exists(base: Path, folder_name: str) -> str | None:
 
 def _get_doc_type_map() -> dict[str, dict]:
     """從 DOC_TASKS 建立 doc_type → task 的查詢字典。"""
-    return {t["doc_type"]: t for t in _pta.DOC_TASKS}
+    return get_doc_type_map()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -219,7 +221,7 @@ async def upload_files(
     若已存在同名資料夾且有衝突檔名，整個資料夾先備份再重建。
     """
     # 驗證 doc_type
-    valid_types = [t["doc_type"] for t in _pta.DOC_TASKS]
+    valid_types = [t["doc_type"] for t in DOC_TASKS]
     if doc_type not in valid_types:
         raise HTTPException(status_code=400, detail=f"無效的 doc_type，可用: {valid_types}")
 
@@ -278,7 +280,7 @@ async def upload_files(
 async def list_models():
     """
     回傳可選用的 Vision AI 模型清單，含可用狀態。
-    api_key 為空或含有 placeholder 文字（在此輸入）時標示為不可用。
+    聚合三個陣營：Azure / Gemini（來自 _pta.VISION_MODELS）+ Local（來自 _ptl.LOCAL_MODELS）。
     """
     result = []
     for model_id, cfg in _pta.VISION_MODELS.items():
@@ -287,7 +289,15 @@ async def list_models():
         result.append({
             "id": model_id,
             "label": cfg["label"],
+            "camp": model_id_to_camp(model_id),
             "available": available,
+        })
+    for model_id, cfg in _ptl.LOCAL_MODELS.items():
+        result.append({
+            "id": model_id,
+            "label": cfg["label"],
+            "camp": "local",
+            "available": True,   # Ollama 在本機，URL 設定好即視為可用
         })
     return result
 
@@ -379,10 +389,6 @@ def _run_parse(folder_name: str, file_name: str | None, log_queue: queue.Queue, 
 
 def _do_parse(folder_name: str, file_name: str | None, log_queue: queue.Queue, model_id: str | None = None) -> None:
     """核心解析邏輯（在 redirect_stdout 環境內執行）。"""
-    from azure.core.credentials import AzureKeyCredential
-    from azure.ai.documentintelligence import DocumentIntelligenceClient
-    import parse_tenders_azure as pta
-
     folder = UPLOAD_BASE / folder_name
     doc_type_path = folder / DOC_TYPE_FILE
     if not doc_type_path.exists():
@@ -398,68 +404,114 @@ def _do_parse(folder_name: str, file_name: str | None, log_queue: queue.Queue, m
 
     vision_prompt = task["vision_prompt"]
 
-    # 建立 Vision 客戶端
-    vision_client, vision_deployment, model_label = _pta.build_vision_client(model_id)
-    print(f"🤖 Vision 模型: {model_label}")
+    camp = model_id_to_camp(model_id)
+    camp_dir = RAGTEST_BASE / camp
+    camp_dir.mkdir(parents=True, exist_ok=True)
 
-    # 輸出目錄：ragtest/{folder_name}/input/
-    output_dir = RAGTEST_BASE / folder_name / "input"
+    # 輸出目錄：ragtest/{camp}/{doc_type}/input/
+    output_dir = camp_dir / doc_type / "input"
 
-    # 若輸出目錄已存在 → 備份
-    ragtest_folder = RAGTEST_BASE / folder_name
+    # 若輸出目錄已存在 → 在陣營目錄內備份
     if output_dir.exists():
-        backup_path = _backup_if_exists(RAGTEST_BASE, folder_name)
-        print(f"📦 已備份既有解析輸出至: {backup_path}")
-        output_dir = RAGTEST_BASE / folder_name / "input"
+        backup_path = _backup_if_exists(camp_dir, doc_type)
+        print(f"\U0001f4e6 已備份既有解析輸出至: {backup_path}")
+        output_dir = camp_dir / doc_type / "input"
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 初始化 Azure DI 客戶端
-    di_client = DocumentIntelligenceClient(
-        pta.AZURE_DI_ENDPOINT,
-        AzureKeyCredential(pta.AZURE_DI_KEY),
-    )
+    if camp == "local":
+        # ── Local 陣營：markitdown + PyMuPDF + Ollama Vision ───────
+        vision_client, vision_deployment, model_label = _ptl.build_local_client(model_id)
+        print(f"\U0001f3e0 Vision 模型 (Local): {model_label}")
+        _ptl._stats = _ptl._RunStats()
 
-    # 重置統計
-    pta._stats = pta._RunStats()
-
-    # 決定要處理的檔案清單
-    if file_name:
-        candidate = folder / file_name
-        if not candidate.exists():
-            print(f"❌ 找不到指定檔案: {file_name}")
-            return
-        files_to_process = [candidate]
-    else:
-        files_to_process = sorted(
-            f for f in folder.iterdir()
-            if f.is_file() and f.suffix.lower() in {".pdf", ".doc", ".docx"}
-        )
-
-    if not files_to_process:
-        print(f"⚠️ 資料夾 '{folder_name}' 內沒有可解析的 PDF/DOCX 檔案")
-        return
-
-    print(f"\n📂 開始解析資料夾 [{folder_name}] (類型: {doc_type})")
-    print(f"   共 {len(files_to_process)} 個檔案，輸出至: {output_dir}")
-
-    for file_path in files_to_process:
-        try:
-            pta.process_file(
-                di_client=di_client,
-                file_path=str(file_path),
-                output_dir=str(output_dir),
-                vision_prompt=vision_prompt,
-                doc_type=doc_type,
-                vision_client=vision_client,
-                vision_deployment=vision_deployment,
+        if file_name:
+            candidate = folder / file_name
+            if not candidate.exists():
+                print(f"❌ 找不到指定檔案: {file_name}")
+                return
+            files_to_process = [candidate]
+        else:
+            files_to_process = sorted(
+                f for f in folder.iterdir()
+                if f.is_file() and f.suffix.lower() in {".pdf", ".doc", ".docx"}
             )
-            pta._stats.files_processed += 1
-        except Exception as e:
-            print(f"❌ 處理 {file_path.name} 失敗: {e}")
-            pta._stats.files_failed += 1
 
-    pta._print_stats(model_label, model_id)
+        if not files_to_process:
+            print(f"⚠️ 資料夾 '{folder_name}' 內沒有可解析的 PDF/DOCX 檔案")
+            return
+
+        print(f"\n📂 開始解析資料夾 [{folder_name}] (類型: {doc_type}, 陣營: local)")
+        print(f"   共 {len(files_to_process)} 個檔案，輸出至: {output_dir}")
+
+        for file_path in files_to_process:
+            try:
+                _ptl.process_file(
+                    file_path=str(file_path),
+                    output_dir=str(output_dir),
+                    vision_prompt=vision_prompt,
+                    doc_type=doc_type,
+                    vision_client=vision_client,
+                    vision_deployment=vision_deployment,
+                )
+                _ptl._stats.files_processed += 1
+            except Exception as e:
+                print(f"❌ 處理 {file_path.name} 失敗: {e}")
+                _ptl._stats.files_failed += 1
+
+        _ptl._print_stats(model_label, model_id)
+
+    else:
+        # ── Azure / Gemini 陣營：Azure DI + Vision ─────────────────
+        from azure.core.credentials import AzureKeyCredential
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        import parse_tenders_azure as pta
+
+        vision_client, vision_deployment, model_label = _pta.build_vision_client(model_id)
+        print(f"\U0001f916 Vision 模型 (Azure/Gemini): {model_label}")
+
+        di_client = DocumentIntelligenceClient(
+            pta.AZURE_DI_ENDPOINT,
+            AzureKeyCredential(pta.AZURE_DI_KEY),
+        )
+        pta._stats = pta._RunStats()
+
+        if file_name:
+            candidate = folder / file_name
+            if not candidate.exists():
+                print(f"❌ 找不到指定檔案: {file_name}")
+                return
+            files_to_process = [candidate]
+        else:
+            files_to_process = sorted(
+                f for f in folder.iterdir()
+                if f.is_file() and f.suffix.lower() in {".pdf", ".doc", ".docx"}
+            )
+
+        if not files_to_process:
+            print(f"⚠️ 資料夾 '{folder_name}' 內沒有可解析的 PDF/DOCX 檔案")
+            return
+
+        print(f"\n📂 開始解析資料夾 [{folder_name}] (類型: {doc_type}, 陣營: {camp})")
+        print(f"   共 {len(files_to_process)} 個檔案，輸出至: {output_dir}")
+
+        for file_path in files_to_process:
+            try:
+                pta.process_file(
+                    di_client=di_client,
+                    file_path=str(file_path),
+                    output_dir=str(output_dir),
+                    vision_prompt=vision_prompt,
+                    doc_type=doc_type,
+                    vision_client=vision_client,
+                    vision_deployment=vision_deployment,
+                )
+                pta._stats.files_processed += 1
+            except Exception as e:
+                print(f"❌ 處理 {file_path.name} 失敗: {e}")
+                pta._stats.files_failed += 1
+
+        pta._print_stats(model_label, model_id)
     print("\n✅ 解析任務完成！")
 
 
@@ -547,30 +599,32 @@ async def list_index_models():
 
 @app.get("/api/index-folders")
 async def list_index_folders():
-    """列出 ragtest/ 下含有 input/*.md 的非備份子目錄（可建立索引）。"""
+    """列出 ragtest/{camp}/{doc_type}/ 下含有 input/*.md 的目錄（可建立索引）。"""
     RAGTEST_BASE.mkdir(parents=True, exist_ok=True)
     result = []
-    for item in sorted(RAGTEST_BASE.iterdir()):
-        if not item.is_dir():
+    for camp_dir in sorted(RAGTEST_BASE.iterdir()):
+        if not camp_dir.is_dir() or camp_dir.name not in CAMP_NAMES:
             continue
-        if _is_backup_folder(item.name):
-            continue
-        input_dir = item / "input"
-        if not input_dir.exists():
-            continue
-        md_files = list(input_dir.glob("*.md"))
-        if not md_files:
-            continue
-        has_settings = (item / "settings.yaml").exists()
-        lancedb_dir = item / "output" / "lancedb"
-        indexed = lancedb_dir.exists() and any(True for _ in lancedb_dir.iterdir()) if lancedb_dir.exists() else False
-        result.append({
-            "name": item.name,
-            "md_count": len(md_files),
-            "has_settings": has_settings,
-            "indexed": indexed,
-            "indexing": item.name in _indexing_lock,
-        })
+        for item in sorted(camp_dir.iterdir()):
+            if not item.is_dir() or _is_backup_folder(item.name):
+                continue
+            input_dir = item / "input"
+            if not input_dir.exists():
+                continue
+            md_files = list(input_dir.glob("*.md"))
+            if not md_files:
+                continue
+            folder_key = f"{camp_dir.name}/{item.name}"   # e.g. "azure/government"
+            has_settings = (item / "settings.yaml").exists()
+            lancedb_dir = item / "output" / "lancedb"
+            indexed = lancedb_dir.exists() and any(True for _ in lancedb_dir.iterdir()) if lancedb_dir.exists() else False
+            result.append({
+                "name":         folder_key,
+                "md_count":     len(md_files),
+                "has_settings": has_settings,
+                "indexed":      indexed,
+                "indexing":     folder_key in _indexing_lock,
+            })
     return result
 
 
@@ -763,18 +817,20 @@ async def list_query_models():
 
 @app.get("/api/query-types")
 async def list_query_types():
-    """列出可查詢的索引目錄（只回傳 lancedb 非空的）。"""
+    """列出可查詢的索引目錄（按陣營+文件類型，只回傳 lancedb 非空的）。"""
+    _camp_label = {"azure": "Azure", "gemini": "Gemini", "local": "Local"}
     result = []
-    for type_name, output_dir in _qt.DOC_INDEX_ROOTS.items():
-        lancedb = Path(output_dir) / "lancedb"
-        result.append({
-            "id":        type_name,
-            "label":     {"government":    "government（政府標案）",
-                          "stip":          "stip（門市銷售指南）",
-                          "mixed_tenders": "mixed_tenders（軍服標案）",
-                          "default":       "default（通用）"}.get(type_name, type_name),
-            "available": lancedb.exists() and any(lancedb.iterdir()),
-        })
+    for camp in CAMP_NAMES:
+        for t in DOC_TASKS:
+            doc_type   = t["doc_type"]
+            output_dir = get_index_root(doc_type, camp)
+            lancedb    = Path(output_dir) / "lancedb"
+            is_available = lancedb.exists() and any(lancedb.iterdir())
+            result.append({
+                "id":        f"{camp}/{doc_type}",
+                "label":     f"{_camp_label[camp]} - {t['description']} ({doc_type})",
+                "available": is_available,
+            })
     return result
 
 
@@ -786,7 +842,12 @@ async def run_query(req: QueryRequest):
     """
     async def _stream() -> AsyncGenerator[str, None]:
         try:
-            input_dir = _qt.DOC_INDEX_ROOTS.get(req.doc_type)
+            # req.doc_type 格式為 "{camp}/{doc_type}"，例如 "azure/government"
+            if "/" in req.doc_type:
+                _camp, _dtype = req.doc_type.split("/", 1)
+                input_dir = get_index_root(_dtype, _camp)
+            else:
+                input_dir = None  # doc_type 格式無效（應傳 "{camp}/{doc_type}"）
             if not input_dir:
                 yield f"data: ❌ 不支援的 doc_type: {req.doc_type}\n\n"
                 yield "event: error\ndata: invalid type\n\n"

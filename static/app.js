@@ -4,6 +4,22 @@
 
 'use strict';
 
+// ═══════════ 陣營選擇器（全域狀態）═══════════════════════════════════════
+
+let currentCamp = 'azure';
+const _allParseModels = [];  // 快取 /api/models
+const _allQueryModels = [];  // 快取 /api/query-models
+const _allQueryTypes  = [];  // 快取 /api/query-types
+const _allIndexModels = [];  // 快取 /api/index-models
+
+/** 從 model_id 前綴推斷陣營（與後端 model_id_to_camp 一致）*/
+function campOf(modelId) {
+  if (!modelId) return 'azure';
+  if (modelId.startsWith('ollama')) return 'local';
+  if (modelId === 'gemini') return 'gemini';
+  return 'azure';
+}
+
 // ═══════════════════════════════ Tab 切換 ═══════════════════════════════
 
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -225,34 +241,39 @@ async function _loadParseFoldersData() {
 
 async function loadModels() {
   parseModelSelect.innerHTML = '<option value="" disabled selected>— 載入中 —</option>';
-
   try {
-    const res  = await fetch('/api/models');
-    const data = await res.json();
-
-    parseModelSelect.innerHTML = '';
-    let hasSelected = false;
-    data.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value       = m.id;
-      opt.textContent = m.available ? m.label : `${m.label}  ⚠️（未設定 API Key）`;
-      opt.disabled    = !m.available;
-      if (!hasSelected && m.available) {
-        opt.selected = true;
-        hasSelected  = true;
-      }
-      parseModelSelect.appendChild(opt);
-    });
-
-    if (!hasSelected) {
-      parseModelHint.textContent = '⚠️ 沒有可用模型，請先設定 .env';
-      parseModelHint.style.color = '#f0a500';
-    } else {
-      parseModelHint.textContent = '';
-    }
+    const data = await fetch('/api/models').then(r => r.json());
+    _allParseModels.length = 0;
+    _allParseModels.push(...data);
+    _renderParseModels();
   } catch (err) {
     parseModelSelect.innerHTML = '<option value="" disabled selected>（載入失敗）</option>';
   }
+}
+
+function _renderParseModels() {
+  parseModelSelect.innerHTML = '';
+  const filtered = _allParseModels.filter(m => m.camp === currentCamp);
+  if (!filtered.length) {
+    const opt = document.createElement('option');
+    opt.disabled = opt.selected = true;
+    opt.textContent = `（${currentCamp} 陣營無可用 Vision 模型）`;
+    parseModelSelect.appendChild(opt);
+    parseModelHint.textContent = '⚠️ 請切換陣營或在 .env 設定對應 Key';
+    parseModelHint.style.color = 'var(--warning)';
+    return;
+  }
+  let hasSelected = false;
+  filtered.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value       = m.id;
+    opt.textContent = m.available ? m.label : `${m.label}  ⚠️（未設定 API Key）`;
+    opt.disabled    = !m.available;
+    if (!hasSelected && m.available) { opt.selected = true; hasSelected = true; }
+    parseModelSelect.appendChild(opt);
+  });
+  parseModelHint.textContent = hasSelected ? '' : '⚠️ 沒有可用模型，請先設定 .env';
+  parseModelHint.style.color = hasSelected ? '' : 'var(--warning)';
 }
 
 // ── 載入可選擇的檔案 ─────────────────────────────────────────
@@ -465,30 +486,42 @@ async function _loadIndexFoldersData() {
 
 async function loadIndexModels() {
   indexModelSelect.innerHTML = '<option value="" disabled selected>— 載入中 —</option>';
-
   try {
-    const res  = await fetch('/api/index-models');
-    const data = await res.json();
-
-    indexModelSelect.innerHTML = '';
-    let hasSelected = false;
-    data.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value       = m.id;
-      opt.textContent = m.available ? m.label : `${m.label}  ⚠️（無 settings 模板）`;
-      opt.disabled    = !m.available;
-      if (!hasSelected && m.available) { opt.selected = true; hasSelected = true; }
-      indexModelSelect.appendChild(opt);
-    });
-
-    if (!hasSelected) {
-      indexModelHint.textContent = '⚠️ 沒有可用的索引模型，請檢查 settings.yaml 模板檔是否存在';
-      indexModelHint.style.color = 'var(--warning)';
-    } else {
-      indexModelHint.textContent = '';
-    }
+    const data = await fetch('/api/index-models').then(r => r.json());
+    _allIndexModels.length = 0;
+    _allIndexModels.push(...data);
+    _renderIndexModels();
   } catch (err) {
     indexModelSelect.innerHTML = '<option value="" disabled selected>（載入失敗）</option>';
+  }
+}
+
+function _renderIndexModels() {
+  indexModelSelect.innerHTML = '';
+  if (currentCamp === 'local') {
+    const opt = document.createElement('option');
+    opt.disabled = opt.selected = true;
+    opt.textContent = '（Local 陣營：GraphRAG 索引由 settings_ollama.yaml 設定）';
+    indexModelSelect.appendChild(opt);
+    indexModelHint.textContent = '⚠️ 請確認 ragtest/local/{type}/ 目錄下有對應的 settings.yaml';
+    indexModelHint.style.color = 'var(--warning)';
+    return;
+  }
+  const filtered = _allIndexModels.filter(m => campOf(m.id) === currentCamp);
+  let hasSelected = false;
+  filtered.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value       = m.id;
+    opt.textContent = m.available ? m.label : `${m.label}  ⚠️（無 settings 模板）`;
+    opt.disabled    = !m.available;
+    if (!hasSelected && m.available) { opt.selected = true; hasSelected = true; }
+    indexModelSelect.appendChild(opt);
+  });
+  if (!hasSelected) {
+    indexModelHint.textContent = '⚠️ 沒有可用的索引模型，請檢查 settings.yaml 模板檔是否存在';
+    indexModelHint.style.color = 'var(--warning)';
+  } else {
+    indexModelHint.textContent = '';
   }
 }
 
@@ -645,34 +678,62 @@ async function loadQueryTypes() {
       fetch('/api/query-types').then(r => r.json()),
       fetch('/api/query-models').then(r => r.json()),
     ]);
-    queryTypeSelect.innerHTML = '<option value="" disabled selected>— 選擇資料類型 —</option>';
-    typesData.forEach(t => {
+    _allQueryTypes.length = 0;  _allQueryTypes.push(...typesData);
+    _allQueryModels.length = 0; _allQueryModels.push(...modelsData);
+    _renderQueryTypes();
+    _renderQueryModels();
+  } catch (e) {
+    queryTypeHint.textContent = '⚠️ 無法載入索引清單';
+  }
+}
+
+function _renderQueryTypes() {
+  queryTypeSelect.innerHTML = '<option value="" disabled selected>— 選擇資料類型 —</option>';
+  const prefix   = currentCamp + '/';
+  const filtered = _allQueryTypes.filter(t => t.id.startsWith(prefix));
+  if (!filtered.length) {
+    const opt = document.createElement('option');
+    opt.disabled = opt.selected = true;
+    opt.textContent = `（${currentCamp} 陣營尚無索引資料）`;
+    queryTypeSelect.appendChild(opt);
+  } else {
+    filtered.forEach(t => {
       const opt = document.createElement('option');
       opt.value = t.id;
       opt.textContent = t.available ? t.label : `${t.label}  ⚠️ 尚未索引`;
       opt.disabled = !t.available;
       queryTypeSelect.appendChild(opt);
     });
-    const firstType = typesData.find(t => t.available);
-    if (firstType) { queryTypeSelect.value = firstType.id; }
-
-    queryModelSelect.innerHTML = '';
-    modelsData.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.available ? m.label : `${m.label}  ⚠️ 不可用`;
-      opt.disabled = !m.available;
-      queryModelSelect.appendChild(opt);
-      if (m.available && !queryModelSelect.value) queryModelSelect.value = m.id;
-    });
-    const firstModel = modelsData.find(m => m.available);
-    if (firstModel) queryModelHint.textContent = '';
-    else queryModelHint.textContent = '⚠️ 無可用模型';
-
-    updateQueryBtn();
-  } catch (e) {
-    queryTypeHint.textContent = '⚠️ 無法載入索引清單';
+    const firstAvail = filtered.find(t => t.available);
+    if (firstAvail) queryTypeSelect.value = firstAvail.id;
   }
+  updateQueryBtn();
+}
+
+function _renderQueryModels() {
+  queryModelSelect.innerHTML = '';
+  const filtered = _allQueryModels.filter(m => campOf(m.id) === currentCamp);
+  if (!filtered.length) {
+    const opt = document.createElement('option');
+    opt.disabled = opt.selected = true;
+    opt.textContent = `（${currentCamp} 陣營無可用查詢模型）`;
+    queryModelSelect.appendChild(opt);
+    queryModelHint.textContent = currentCamp === 'local' ? '⚠️ Local 陣營查詢模型尚未支援' : '⚠️ 無可用模型';
+    queryModelHint.style.color = 'var(--warning)';
+    return;
+  }
+  let hasSelected = false;
+  filtered.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.available ? m.label : `${m.label}  ⚠️ 不可用`;
+    opt.disabled = !m.available;
+    if (m.available && !hasSelected) { queryModelSelect.value = m.id; hasSelected = true; }
+    queryModelSelect.appendChild(opt);
+  });
+  queryModelHint.textContent = hasSelected ? '' : '⚠️ 無可用模型';
+  queryModelHint.style.color = hasSelected ? '' : 'var(--warning)';
+  updateQueryBtn();
 }
 
 function updateQueryBtn() {
@@ -769,4 +830,20 @@ function resetQueryUI() {
   queryStopBtn.classList.add('hidden');
   updateQueryBtn();
 }
+
+// ═══════ 陣營選擇器：監聽 radio 切換，重新過濾所有 Tab 的模型下拉 ═══════
+
+document.querySelectorAll('input[name="camp"]').forEach(radio => {
+  radio.addEventListener('change', () => {
+    currentCamp = radio.value;
+    document.querySelectorAll('.camp-opt').forEach(el => {
+      el.classList.toggle('active', el.dataset.camp === currentCamp);
+    });
+    // 各 Tab 模型下拉即時重新過濾（不重新 fetch）
+    _renderParseModels();
+    _renderIndexModels();
+    _renderQueryTypes();
+    _renderQueryModels();
+  });
+});
 

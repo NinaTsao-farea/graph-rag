@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 from dotenv import load_dotenv
+from doc_tasks import get_index_root, get_valid_doc_types, CAMP_NAMES
 from graphrag_llm.completion import create_completion
 from graphrag_llm.config import ModelConfig
 from graphrag_llm.embedding import create_embedding
@@ -51,17 +52,6 @@ class _QueryStats:
     start_time: float = field(default_factory=time.time)
 
 _stats = _QueryStats()
-
-# ─────────────────────────────────────────────────────────────
-# 1. 文件類型 → 索引輸出目錄對應表
-#    與 parse_tenders*.py 的 DOC_TASKS 保持一致
-# ─────────────────────────────────────────────────────────────
-DOC_INDEX_ROOTS = {
-    "government":   "./ragtest/government/output",
-    "stip":         "./ragtest/stip/output",
-    "mixed_tenders":"./ragtest/mixed_tenders/output",
-    "default":      "./ragtest/output",   # 向下相容：未指定 --type 時使用
-}
 
 COMMUNITY_LEVEL = 2  # Leiden 社群層級 (數值越高越細緻)
 
@@ -508,9 +498,16 @@ async def main():
     parser.add_argument(
         "--type",
         dest="doc_type",
-        default="default",
-        choices=list(DOC_INDEX_ROOTS.keys()),
-        help="查詢的索引類型，例如: --type stip（預設: default）",
+        default="government",
+        choices=get_valid_doc_types(),
+        help="查詢的索引類型，例如: --type stip（預設: government）",
+    )
+    parser.add_argument(
+        "--camp",
+        dest="camp",
+        default="azure",
+        choices=list(CAMP_NAMES),
+        help="陣營名稱（azure / gemini / local），預設: azure",
     )
     parser.add_argument(
         "--model",
@@ -541,7 +538,7 @@ async def main():
     )
     args = parser.parse_args()
 
-    input_dir = DOC_INDEX_ROOTS[args.doc_type]
+    input_dir = get_index_root(args.doc_type, args.camp)
     model_id  = args.model_id or DEFAULT_QUERY_MODEL_ID
     print(f"📂 索引目錄: {input_dir}")
 

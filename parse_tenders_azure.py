@@ -119,49 +119,9 @@ def build_vision_client(model_id: str | None = None) -> tuple:
     return client, cfg["deployment"], cfg["label"]
 
 # ─────────────────────────────────────────────────────────────
-# 3. 文件類型任務設定（與 parse_tenders.py 一致）
-#    來源資料夾 → (輸出資料夾, 描述, 視覺詢問 Prompt)
+# 3. 文件類型任務設定（集中管理於 doc_tasks.py）
 # ─────────────────────────────────────────────────────────────
-DOC_TASKS = [
-    {
-        "src":          "./rag_poc/input/government",
-        "dest":         "./ragtest/government/input",
-        "doc_type":     "government",
-        "description":  "政府標案",
-        "vision_prompt": (
-            "這是一張政府標案文件中的圖表。"
-            "請詳細描述內容（如設備規格、工程場地願圖、機房佈線機制、驗收程序或金額表），"
-            "並專注標案投標資格、違約條款或年限要求等重要標案內容，以繁體中文回答。"
-        ),
-    },
-    {
-        "src":          "./rag_poc/input/mixed_tenders",
-        "dest":         "./ragtest/mixed_tenders/input",
-        "doc_type":     "mixed_tenders",
-        "description":  "軍服標案",
-        "vision_prompt": (
-            "這是一張軍服標案文件中的圖表。"
-            "請詳細描述內容（提取服裝結構、迷彩規格、布料技術數據、徽章配戴位置、尺碼標準。），"
-            "排除：Logo、通用洗衣符號、情境裝飾圖、文件浮水印。"
-            "並專注標案投標資格、違約條款或年限要求等重要標案內容，以繁體中文回答。"
-        ),
-    },
-    {
-        "src":          "./rag_poc/input/stip",
-        "dest":         "./ragtest/stip/input",
-        "doc_type":     "stip",
-        "description":  "門市銷售指南",
-        "vision_prompt": (
-            "這是一張門市銷售指南中的圖表。"
-            "請判斷此圖是否屬於以下任一類型："
-            "『告警、警示、禁止符號、裝飾圖案、卡通人物、動畫角色、應用程式 logo、流程示意 icon、空白圖片、裝飾性插圖、點數回饋示意插圖、檢測報告、認證文件、保險證明、保單文件』。"
-            "若是，請只回覆 [SKIP]，不要有任何其他文字。"
-            "若否（例如商品照片、方案表格、促銷條件、操作步驟），"
-            "請用繁體中文簡短描述圖片內容，不超過150字，不需要零售建議或總結。"
-        ),
-    },
-    # 新增類型往此列表新增一筆即可，不需修改其他程式碼
-]
+from doc_tasks import DOC_TASKS, get_dest, model_id_to_camp  # noqa: E402
 
 # Azure DI 座標系統為英吋；PyMuPDF 使用點 (1 點 = 1/72 英吋)
 _INCH_TO_PT = 72.0
@@ -676,6 +636,8 @@ def process_file(
         f"---\n"
         f"來源檔案: {file_path.name}\n"
         f"文件類型: {doc_type} ({_doc_desc})\n"
+        f"解析引擎: Document Intelligence \n"
+        f"Vision  : {vision_deployment or 'N/A'}\n"
         f"原始修改日期: {_file_mtime}\n"
         f"解析日期: {_parse_date}\n"
         f"---\n\n"
@@ -731,13 +693,14 @@ def _print_stats(model_label: str | None = None, model_id: str | None = None) ->
     print("═" * 58)
 
 
-def batch_process_folders(only_type: str = None, only_file: str = None) -> None:
+def batch_process_folders(only_type: str = None, only_file: str = None, camp: str = "azure") -> None:
     """
-    依照 DOC_TASKS 設定，按文件類型分別掃描來源資料夾，輸出到獨立目錄。
+    依照 DOC_TASKS 設定，按文件類型分別揃描來源資料夾，輸出到獨立目錄。
     每個 dest 目錄將來對應一個獨立的 GraphRAG 索引工作區。
 
     only_type: 若指定，只處理該 doc_type；None 表示處理全部。
     only_file: 若指定，只處理該檔名（含副檔名，例如 foo.pdf）；None 表示處理全部。
+    camp: 陣營名稱（azure / gemini / local），決定輸出入 ragtest/{camp}/{doc_type}/input/。
     """
     global _stats
     _stats = _RunStats()
@@ -751,8 +714,8 @@ def batch_process_folders(only_type: str = None, only_file: str = None) -> None:
 
     for task in tasks_to_run:
         src           = task["src"]
-        dest          = task["dest"]
         doc_type      = task["doc_type"]
+        dest          = get_dest(doc_type, camp)
         description   = task["description"]
         vision_prompt = task["vision_prompt"]
 

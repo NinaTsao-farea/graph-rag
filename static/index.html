@@ -13,6 +13,23 @@
       <p class="subtitle">Azure Document Intelligence + OpenAI Vision + GraphRAG</p>
     </header>
 
+    <!-- ═══════ 陣營選擇器（全域，影響所有 Tab 的模型下拉）═══════ -->
+    <div class="camp-bar">
+      <span class="camp-label">解析陣營</span>
+      <label class="camp-opt active" data-camp="azure">
+        <input type="radio" name="camp" value="azure" checked />
+        <span>☁️ Azure</span>
+      </label>
+      <label class="camp-opt" data-camp="gemini">
+        <input type="radio" name="camp" value="gemini" />
+        <span>✨ Gemini</span>
+      </label>
+      <label class="camp-opt" data-camp="local">
+        <input type="radio" name="camp" value="local" />
+        <span>🏠 Local</span>
+      </label>
+    </div>
+
     <!-- Tab 切換 -->
     <nav class="tab-bar">
       <button class="tab-btn active" data-tab="upload">☁️ 上傳文件</button>
