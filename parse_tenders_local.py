@@ -57,6 +57,8 @@ from dotenv import load_dotenv
 
 from doc_tasks import DOC_TASKS, get_dest
 
+from markitdown import MarkItDown
+
 load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
@@ -360,15 +362,7 @@ def process_file(
       圖片描述結果附加於文末「## 文件圖表」區塊。
       vision_client=None 時以純文字模式輸出（不呼叫 Ollama）。
       file_id 指定時寫入 YAML；None 時自動生成 "{stem}_{uuid8}"（輸出檔名不受影響）。
-    """
-    # markitdown 依賴在函式內延遲匯入，避免未安裝時影響模組載入
-    try:
-        from markitdown import MarkItDown
-    except ImportError:
-        raise ImportError(
-            "找不到 markitdown 套件，請執行：pip install markitdown"
-        )
-
+    """    
     file_path_obj  = Path(file_path)
     _output_stem   = file_path_obj.stem                        # 輸出 .md 的檔名（固定用原始檔名）
     file_id        = file_id or f"{_output_stem}_{uuid.uuid4().hex[:8]}"  # YAML 用的唯一 ID

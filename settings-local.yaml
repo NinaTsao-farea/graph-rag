@@ -15,9 +15,11 @@
 # ── LLM 模型（文字生成 / 實體提取 / 摘要）────────────────────
 completion_models:
   default_completion_model:
-    model_provider: ollama
-    model: gemma4            # 可改為 llama3.1、mistral、qwen2.5 等本機已下載模型
-    api_base: http://localhost:11434
+    model_provider: openai
+    model: gemma4:e4b            # 可改為 llama3.1、mistral、qwen2.5 等本機已下載模型
+    auth_method: api_key
+    api_key:
+    api_base: http://localhost:11434/v1
     max_tokens: 4000
     temperature: 0.0
     max_retries: 5
@@ -27,9 +29,11 @@ completion_models:
 # ── Embedding 模型（文字向量化）──────────────────────────────
 embedding_models:
   default_embedding_model:
-    model_provider: ollama
+    model_provider: openai
     model: qwen3-embedding:0.6b  # Qwen3-embedding-06B_onnx 的 Ollama tag；HuggingFace ONNX 名不等於 Ollama tag
-    api_base: http://localhost:11434
+    auth_method: api_key
+    api_key:
+    api_base: http://localhost:11434/v1
     max_retries: 5
     sleep_on_rate_limit_recommendation: false
     concurrent_requests: 2
