@@ -1,6 +1,8 @@
 import os
 import io
 import re
+import hashlib
+import uuid
 import base64
 import argparse
 import shutil
@@ -472,6 +474,38 @@ def _process_pdf_chunk(
 
 
 # ─────────────────────────────────────────────────────────────
+# 4.5 Markdown 二次加工
+# ─────────────────────────────────────────────────────────────
+
+def _enrich_markdown(raw_text: str) -> tuple[str, int, str]:
+    """
+    Markdown 二次加工：偵測頁碼、清理雜訊、產生內容 hash。
+
+    步驟：
+      A. 依 Form Feed (\\f) 或明確分頁符號拆頁，插入可見頁碼標記
+      B. 清理殘留的 [SKIP] 旗標（Vision 模型跳過標記）
+      C. 生成 MD5 hash 供版本追蹤
+
+    回傳 (enriched_text, total_pages, content_hash)。
+    """
+    # A. 依分頁符號拆頁並插入頁碼標記
+    pages = re.split(r'\f|---pagebreak---', raw_text)
+    enriched_pages = []
+    for i, page_content in enumerate(pages):
+        page_marker = f"\n\n**[第 {i + 1} 頁]**\n"
+        enriched_pages.append(page_marker + page_content.strip())
+    content = "\n".join(enriched_pages)
+
+    # B. 清理殘留的 [SKIP] 標記
+    content = re.sub(r'\[SKIP\]\n?', '', content)
+
+    # C. 生成內容 hash（MD5，用於版本比對）
+    content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+
+    return content, len(pages), content_hash
+
+
+# ─────────────────────────────────────────────────────────────
 # 5. 主要文件處理函式
 # ─────────────────────────────────────────────────────────────
 
@@ -483,6 +517,7 @@ def process_file(
     doc_type: str = "",
     vision_client=None,
     vision_deployment: str | None = None,
+    file_id: str | None = None,   # 自訂文件 ID；None 時自動生成 {stem}_{uuid8}
 ) -> None:
     """
     使用 Azure Document Intelligence 解析單一 PDF/DOCX：
@@ -491,17 +526,19 @@ def process_file(
       - 文字、表格 → 由 Azure DI 直接輸出 Markdown
       - 圖表 → 以 PyMuPDF 裁切後交由 Azure OpenAI Vision 描述，
                並將描述嵌回 Markdown 對應位置
+      file_id 指定時寫入 YAML；None 時自動生成 "{stem}_{uuid8}"（輸出檔名不受影響）。
     """
-    file_path = Path(file_path)
-    file_id   = file_path.stem
-    is_pdf    = file_path.suffix.lower() == ".pdf"
+    file_path      = Path(file_path)
+    _output_stem   = file_path.stem                        # 輸出 .md 的檔名（固定用原始檔名）
+    file_id        = file_id or f"{_output_stem}_{uuid.uuid4().hex[:8]}"  # YAML 用的唯一 ID
+    is_pdf         = file_path.suffix.lower() == ".pdf"
 
     print(f"\n☁️  正在上傳並解析 [{doc_type}]: {file_path.name} ...")
 
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
-    image_save_dir = output_dir_path / "images" / file_id
+    image_save_dir = output_dir_path / "images" / _output_stem
     image_save_dir.mkdir(parents=True, exist_ok=True)
 
     all_markdowns: list[str] = []
@@ -509,7 +546,7 @@ def process_file(
 
     if is_pdf:
         # ── 拆分（必要時）並逐區塊處理 ─────────────────────────
-        tmp_dir = output_dir_path / "_tmp" / file_id
+        tmp_dir = output_dir_path / "_tmp" / _output_stem
         chunks = _split_pdf_to_chunks(file_path, tmp_dir)
         is_split = len(chunks) > 1
 
@@ -626,7 +663,9 @@ def process_file(
     # ── 合併所有區塊、轉換 HTML 表格並儲存 ──────────────────────
     markdown_content = "\n\n".join(all_markdowns)
     # markdown_content = _convert_html_tables(markdown_content)
-    final_md_path = output_dir_path / f"{file_id}.md"
+
+    # ── Markdown 二次加工（頁碼標記、雜訊清理、hash）────────────
+    enriched_content, total_pages, content_hash = _enrich_markdown(markdown_content)
 
     # ── 插入文件元數據（讓 AI 識別文件新舊與來源）──────────────────
     _doc_desc = next((t["description"] for t in DOC_TASKS if t["doc_type"] == doc_type), doc_type)
@@ -636,17 +675,27 @@ def process_file(
         f"---\n"
         f"來源檔案: {file_path.name}\n"
         f"文件類型: {doc_type} ({_doc_desc})\n"
-        f"解析引擎: Document Intelligence \n"
+        f"解析引擎: Document Intelligence\n"
         f"Vision  : {vision_deployment or 'N/A'}\n"
+        f"file_id : {file_id}\n"
         f"原始修改日期: {_file_mtime}\n"
         f"解析日期: {_parse_date}\n"
+        f"總頁數: {total_pages}\n"
+        f"hash: {content_hash}\n"
         f"---\n\n"
     )
-    markdown_content = _metadata_header + markdown_content
+    _footer = (
+        f"\n\n---\n"
+        f"> **來源溯源**：{file_path.name}"
+        f" | 類型：{doc_type} ({_doc_desc})"
+        f" | 解析日期：{_parse_date}"
+    )
+    final_content = _metadata_header + enriched_content + _footer
 
+    final_md_path = output_dir_path / f"{_output_stem}.md"
     with open(final_md_path, "w", encoding="utf-8") as f:
-        f.write(markdown_content)
-    _stats.output_total_bytes += len(markdown_content.encode("utf-8"))
+        f.write(final_content)
+    _stats.output_total_bytes += len(final_content.encode("utf-8"))
 
     print(f"✅ 解析完成！輸出路徑: {final_md_path}")
 
