@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 from dotenv import load_dotenv
-from doc_tasks import get_index_root, get_valid_doc_types
+from doc_tasks import get_index_root, get_valid_doc_types, SYSTEM_PROMPTS
 from graphrag_llm.completion import create_completion
 from graphrag_llm.config import ModelConfig
 from graphrag_llm.embedding import create_embedding
@@ -44,10 +44,7 @@ load_dotenv()
 CAMP = "local"
 COMMUNITY_LEVEL = 2  # Leiden 社群層級（與 azure 版保持一致）
 
-# ─────────────────────────────────────────────────────────────
-# System Prompts（共用 query_tenders_azure.py 的定義，避免重複維護）
-# ─────────────────────────────────────────────────────────────
-from query_tenders_azure import SYSTEM_PROMPTS  # noqa: E402
+# SYSTEM_PROMPTS 從 doc_tasks.py 匯入（所有陣營的單一來源）
 
 
 # ─────────────────────────────────────────────────────────────
