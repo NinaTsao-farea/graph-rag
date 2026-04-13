@@ -1,0 +1,47 @@
+# GraphRAG Local (Ollama) 配置
+# 檔案位置：ragtest/local/mixed_tenders/settings.yaml
+#
+# 與 ragtest/azure/mixed_tenders/settings.yaml 對照說明：
+#   Azure  → model_provider: azure + api_key + Azure endpoint
+#   Local  → model_provider: ollama + 本機 Ollama 端點 (無需 API key)
+#
+# 前置條件：
+#   1. 安裝並啟動 Ollama：https://ollama.com
+#   2. 拉取所需模型（若尚未下載）：
+#        ollama pull llama3.1
+#        ollama pull nomic-embed-text
+#   3. 確認 Ollama 正在執行：ollama serve（或背景已啟動）
+
+# ── LLM 模型（文字生成 / 實體提取 / 摘要）────────────────────
+completion_models:
+  default_completion_model:
+    model_provider: ollama
+    model: gemma4            # 可改為 llama3.1、mistral、qwen2.5 等本機已下載模型
+    api_base: http://localhost:11434
+    max_tokens: 4000
+    temperature: 0.0
+    max_retries: 5
+    sleep_on_rate_limit_recommendation: false  # 本機無速率限制
+    concurrent_requests: 2                     # Ollama 預設單執行緒，建議 ≤2
+
+# ── Embedding 模型（文字向量化）──────────────────────────────
+embedding_models:
+  default_embedding_model:
+    model_provider: ollama
+    model: qwen3-embedding:0.6b  # Qwen3-embedding-06B_onnx 的 Ollama tag；HuggingFace ONNX 名不等於 Ollama tag
+    api_base: http://localhost:11434
+    max_retries: 5
+    sleep_on_rate_limit_recommendation: false
+    concurrent_requests: 2
+
+# ── 分塊設定（與 Azure 版保持一致）──────────────────────────
+chunks:
+  size: 1200
+  overlap: 200
+
+# ── 輸入設定（與 Azure 版保持一致）──────────────────────────
+input:
+  type: text
+  base_dir: "input"
+  file_pattern: ".*\\.md$$"
+  encoding: utf-8
