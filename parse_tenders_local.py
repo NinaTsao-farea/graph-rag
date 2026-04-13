@@ -37,8 +37,11 @@ MarkItDown PDF 圖片限制說明
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import io
+import re
+import uuid
 import base64
 import argparse
 import time
@@ -297,6 +300,38 @@ def describe_image(
 
 
 # ─────────────────────────────────────────────────────────────
+# 5.5 Markdown 二次加工
+# ─────────────────────────────────────────────────────────────
+
+def _enrich_markdown(raw_text: str) -> tuple[str, int, str]:
+    """
+    Markdown 二次加工：偵測頁碼、清理雜訊、產生內容 hash。
+
+    步驟：
+      A. 依 Form Feed (\\f) 或明確分頁符號拆頁，插入可見頁碼標記
+      B. 清理殘留的 [SKIP] 旗標（Vision 模型跳過標記）
+      C. 生成 MD5 hash 供版本追蹤
+
+    回傳 (enriched_text, total_pages, content_hash)。
+    """
+    # A. 依分頁符號拆頁並插入頁碼標記
+    pages = re.split(r'\f|---pagebreak---', raw_text)
+    enriched_pages = []
+    for i, page_content in enumerate(pages):
+        page_marker = f"\n\n**[第 {i + 1} 頁]**\n"
+        enriched_pages.append(page_marker + page_content.strip())
+    content = "\n".join(enriched_pages)
+
+    # B. 清理殘留的 [SKIP] 標記
+    content = re.sub(r'\[SKIP\]\n?', '', content)
+
+    # C. 生成內容 hash（MD5，用於版本比對）
+    content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+
+    return content, len(pages), content_hash
+
+
+# ─────────────────────────────────────────────────────────────
 # 6. 主要文件處理函式（介面契約與 parse_tenders_azure.py 對齊）
 # ─────────────────────────────────────────────────────────────
 
@@ -307,6 +342,7 @@ def process_file(
     doc_type:           str        = "",
     vision_client                  = None,
     vision_deployment:  str | None = None,
+    file_id:            str | None = None,   # 自訂文件 ID；None 時自動生成 {stem}_{uuid8}
     # ── 注意：無 di_client 參數（Local 版無需 Azure DI）──────
 ) -> None:
     """
@@ -323,6 +359,7 @@ def process_file(
 
       圖片描述結果附加於文末「## 文件圖表」區塊。
       vision_client=None 時以純文字模式輸出（不呼叫 Ollama）。
+      file_id 指定時寫入 YAML；None 時自動生成 "{stem}_{uuid8}"（輸出檔名不受影響）。
     """
     # markitdown 依賴在函式內延遲匯入，避免未安裝時影響模組載入
     try:
@@ -332,16 +369,17 @@ def process_file(
             "找不到 markitdown 套件，請執行：pip install markitdown"
         )
 
-    file_path_obj = Path(file_path)
-    file_id       = file_path_obj.stem
-    is_pdf        = file_path_obj.suffix.lower() == ".pdf"
+    file_path_obj  = Path(file_path)
+    _output_stem   = file_path_obj.stem                        # 輸出 .md 的檔名（固定用原始檔名）
+    file_id        = file_id or f"{_output_stem}_{uuid.uuid4().hex[:8]}"  # YAML 用的唯一 ID
+    is_pdf         = file_path_obj.suffix.lower() == ".pdf"
 
     print(f"\n🏠 本地解析 [{doc_type}]: {file_path_obj.name} ...")
 
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
-    image_save_dir = output_dir_path / "images" / file_id
+    image_save_dir = output_dir_path / "images" / _output_stem
     image_save_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 1. 文字 / 表格擷取（markitdown）────────────────────────
@@ -400,6 +438,9 @@ def process_file(
     if image_sections:
         markdown_text += "\n\n## 文件圖表\n" + "\n".join(image_sections)
 
+    # ── 4.5 Markdown 二次加工（頁碼標記、雜訊清理、hash）────────
+    enriched_text, total_pages, content_hash = _enrich_markdown(markdown_text)
+
     # ── 5. 插入文件元數據 ────────────────────────────────────────
     _doc_desc   = next((t["description"] for t in DOC_TASKS if t["doc_type"] == doc_type), doc_type)
     _parse_date = datetime.now().strftime("%Y-%m-%d")
@@ -410,14 +451,23 @@ def process_file(
         f"文件類型: {doc_type} ({_doc_desc})\n"
         f"解析引擎: markitdown + PyMuPDF (Local)\n"
         f"Vision  : {vision_deployment or 'N/A'}\n"
+        f"file_id : {file_id}\n"
         f"原始修改日期: {_file_mtime}\n"
         f"解析日期: {_parse_date}\n"
+        f"總頁數: {total_pages}\n"
+        f"hash: {content_hash}\n"
         f"---\n\n"
     )
-    final_content = _metadata_header + markdown_text
+    _footer = (
+        f"\n\n---\n"
+        f"> **來源溯源**：{file_path_obj.name}"
+        f" | 類型：{doc_type} ({_doc_desc})"
+        f" | 解析日期：{_parse_date}"
+    )
+    final_content = _metadata_header + enriched_text + _footer
 
     # ── 6. 寫出 .md ──────────────────────────────────────────────
-    final_md_path = output_dir_path / f"{file_id}.md"
+    final_md_path = output_dir_path / f"{_output_stem}.md"
     with open(final_md_path, "w", encoding="utf-8") as f:
         f.write(final_content)
     _stats.output_total_bytes += len(final_content.encode("utf-8"))
