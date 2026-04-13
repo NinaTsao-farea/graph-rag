@@ -28,8 +28,14 @@ from pydantic import BaseModel
 import parse_tenders_azure as _pta
 import parse_tenders_local as _ptl
 import index_tenders_azure as _it
-import query_tenders as _qt
+import query_tenders_azure as _qt_azure
+import query_tenders_local as _qt_local
 from doc_tasks import DOC_TASKS, get_doc_type_map, get_dest, get_index_root, model_id_to_camp, CAMP_NAMES
+
+
+def _get_query_module(camp: str):
+    """依陣營回傳對應的 query 模組（local → _qt_local，其餘 → _qt_azure）。"""
+    return _qt_local if camp == "local" else _qt_azure
 
 # ─────────────────────────────────────────────────────────────
 # GraphRAG 索引模型開隢（指向 settings.yaml 模板）
@@ -802,16 +808,19 @@ class QueryRequest(BaseModel):
 
 @app.get("/api/query-models")
 async def list_query_models():
-    """列出可用 Query AI 模型（比照 /api/models）。"""
+    """列出可用 Query AI 模型，聚合 Azure/Gemini（_qt_azure）與 Local Ollama（_qt_local）。"""
     result = []
-    for mid, cfg in _qt.QUERY_MODELS.items():
-        has_key = bool(cfg.get("chat") and getattr(cfg["chat"], "api_key", None)
-                       and cfg["chat"].api_key != "your-api-key-here")
-        result.append({
-            "id":        mid,
-            "label":     cfg["label"],
-            "available": has_key,
-        })
+    # Azure / Gemini 陣營
+    for mid, cfg in _qt_azure.QUERY_MODELS.items():
+        camp = cfg.get("camp", model_id_to_camp(mid))
+        has_key = bool(
+            cfg.get("chat") and getattr(cfg["chat"], "api_key", None)
+            and cfg["chat"].api_key != "your-api-key-here"
+        )
+        result.append({"id": mid, "label": cfg["label"], "camp": camp, "available": has_key})
+    # Local Ollama 陣營
+    for mid, cfg in _qt_local.QUERY_MODELS.items():
+        result.append({"id": mid, "label": cfg["label"], "camp": "local", "available": True})
     return result
 
 
@@ -864,10 +873,14 @@ async def run_query(req: QueryRequest):
             yield f"data: 📂 索引目錄：{input_dir}\n\n"
             yield ": heartbeat\n\n"
 
+            # 依陣營選擇對應的 query 模組
+            _qt = _get_query_module(_camp)
+
             # 建立搜索引擎（CPU 密集，放入執行緒）
+            # 注意：build_engines 只接受純 doc_type（如 "government"），不含陣營前綴
             loop = asyncio.get_event_loop()
             local_engine, global_engine = await loop.run_in_executor(
-                _executor, _qt.build_engines, input_dir, req.doc_type, req.model_id
+                _executor, _qt.build_engines, input_dir, _dtype, req.model_id
             )
             yield f"data: ✅ 索引載入完成，開始查詢…\n\n"
             yield ": heartbeat\n\n"
