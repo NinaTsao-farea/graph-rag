@@ -317,7 +317,7 @@ def _enrich_markdown(raw_text: str) -> tuple[str, int, str]:
     回傳 (enriched_text, total_pages, content_hash)。
     """
     # A. 依分頁符號拆頁並插入頁碼標記
-    pages = re.split(r'\f|---pagebreak---', raw_text)
+    pages = re.split(r'\f|---pagebreak---|<!--\s*PageBreak\s*-->', raw_text)
     enriched_pages = []
     for i, page_content in enumerate(pages):
         page_marker = f"\n\n**[第 {i + 1} 頁]**\n"

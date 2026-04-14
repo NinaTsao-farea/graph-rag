@@ -313,14 +313,25 @@ def _build_citations(result, input_dir: str) -> str:
 
     base = Path(input_dir)
 
-    # 1. 從 text_units.parquet 建立 「文字內容前 200 字 → document_id」 映射
-    #    （context_data sources 的 id 是 human_readable_id 整數，不是「ハッシュ ID」，無法直接對熵）
+    # 1. 從 text_units.parquet 建立兩種映射：
+    #    主路徑：human_readable_id（整數）→ document_id
+    #           context_data["sources"]["id"] 就是 human_readable_id，可直接對應
+    #    備用路徑：文字前 200 字 → document_id（human_readable_id 缺失時退回）
+    hrid_to_doc: dict[int, str] = {}
     text_to_doc: dict[str, str] = {}
     try:
         tu_df = pd.read_parquet(str(base / "text_units.parquet"))
         for _, row in tu_df.iterrows():
+            doc_id_val = str(row.get("document_id", ""))
+            hrid = row.get("human_readable_id")
+            if hrid is not None:
+                try:
+                    hrid_to_doc[int(hrid)] = doc_id_val
+                except (ValueError, TypeError):
+                    pass
             text_key = str(row.get("text", ""))[:200]
-            text_to_doc[text_key] = str(row.get("document_id", ""))
+            if text_key:
+                text_to_doc[text_key] = doc_id_val
     except Exception:
         pass
 
@@ -337,32 +348,51 @@ def _build_citations(result, input_dir: str) -> str:
         pass
 
     # 3. 從每個 source 文字片段提取頁碼，按來源檔名分組
+    #    即使文字片段無頁碼標記，只要能判斷來源檔名仍納入引用（不顯示頁碼）
     file_pages: dict[str, set[int]] = defaultdict(set)
     for _, row in sources_df.iterrows():
         text  = str(row.get("text", ""))
         pages = _extract_page_numbers(text)
-        if not pages:
-            continue
 
-        # 以前 200 字匹配 text_units.parquet，取得 document_id
-        doc_id   = text_to_doc.get(text[:200], "")
-        filename = doc_to_title.get(doc_id, "")
+        # 主路徑：以 human_readable_id 對應 document_id → filename
+        src_id = row.get("id")
+        filename = ""
+        if src_id is not None:
+            try:
+                doc_id = hrid_to_doc.get(int(src_id), "")
+                filename = doc_to_title.get(doc_id, "")
+            except (ValueError, TypeError):
+                pass
 
-        # fallback：從文字 front matter 抓「來源檔案」
+        # 備用路徑：文字前 200 字匹配（hrid 未命中或 doc_id 對不到 title 時）
+        if not filename:
+            doc_id = text_to_doc.get(text[:200], "")
+            filename = doc_to_title.get(doc_id, "")
+
+        # 最終 fallback：從文字 front matter 抓「來源檔案」
         if not filename:
             m = re.search(r'來源檔案:\s*(.+)', text)
-            filename = m.group(1).strip() if m else "（來源不明）"
+            filename = m.group(1).strip() if m else ""
+
+        if not filename:
+            continue  # 來源完全無法判斷，略過
 
         for p in pages:
             file_pages[filename].add(p)
+        # 有來源但無頁碼標記 → 建立空集合（引用時不顯示頁碼）
+        if not pages and filename not in file_pages:
+            file_pages[filename] = set()
 
     if not file_pages:
         return ""
 
     lines = ["\n📎 引用出處："]
     for idx, (filename, pages) in enumerate(sorted(file_pages.items()), start=1):
-        page_str = "、".join(str(p) for p in sorted(pages)) if pages else "—"
-        lines.append(f"  [{idx}] {filename}  第 {page_str} 頁")
+        if pages:
+            page_str = "、".join(str(p) for p in sorted(pages))
+            lines.append(f"  [{idx}] {filename}  第 {page_str} 頁")
+        else:
+            lines.append(f"  [{idx}] {filename}")
     return "\n".join(lines)
 
 
