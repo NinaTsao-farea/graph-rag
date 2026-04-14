@@ -28,6 +28,7 @@ from pydantic import BaseModel
 import parse_tenders_azure as _pta
 import parse_tenders_local as _ptl
 import index_tenders_azure as _it
+import index_tenders_local as _it_local
 import query_tenders_azure as _qt_azure
 import query_tenders_local as _qt_local
 from doc_tasks import DOC_TASKS, get_doc_type_map, get_dest, get_index_root, model_id_to_camp, CAMP_NAMES
@@ -738,9 +739,12 @@ def _run_index(folder_name: str, log_queue: queue.Queue, model_id: str | None = 
         _proc_done.set()
         wall = time.time() - t0
 
-        # 輸出索引統計摘要（重導 stdout 至 queue）
+        # 輸出索引統計摘要（重導 stdout 至 queue，依陣營選擇對應模組）
         with redirect_stdout(QueueWriter()):
-            _it._print_index_stats(root, wall, returncode, model_id)
+            if camp == "local":
+                _it_local._print_index_stats(root, wall, returncode)
+            else:
+                _it._print_index_stats(root, wall, returncode, model_id)
 
     except Exception as e:
         log_queue.put(f"❌ 未預期錯誤: {e}")
