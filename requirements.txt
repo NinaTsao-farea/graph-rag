@@ -1,6 +1,6 @@
 # --- 核心 AI 框架 (2026 穩定版) ---
 graphrag>=3.0.6
-docling>=1.2.0
+markitdown
 
 # --- 資料處理與儲存 ---
 pandas>=2.1.0
