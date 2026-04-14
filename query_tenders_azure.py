@@ -2,8 +2,11 @@
 import asyncio
 import argparse
 import os
+import re
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -157,7 +160,7 @@ def build_engines(input_dir: str, doc_type: str, model_id: str | None = None):
     lancedb_uri = f"{input_dir}/lancedb"
 
     chat_model, text_embedder, tokenizer, _cfg = build_query_client(model_id)
-    print(f"🤖 查詢選用模型: {_cfg['label']}")
+    print(f"🤖 查詢選用模型: {_cfg['label']}   （陣營: azure")
 
     _system_prompt = SYSTEM_PROMPTS.get(doc_type, SYSTEM_PROMPTS["default"])
     entity_df       = pd.read_parquet(f"{input_dir}/entities.parquet")
@@ -263,6 +266,106 @@ def build_engines(input_dir: str, doc_type: str, model_id: str | None = None):
 # ─────────────────────────────────────────────────────────────
 # 4. 搜索函式
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 3b. 頁碼提取與引用出處
+# ─────────────────────────────────────────────────────────────
+
+_RE_PAGE_MARKERS = [
+    re.compile(r'\*\*\[第\s*(\d+)\s*頁\]\*\*'),           # **[第 N 頁]**
+    re.compile(r'<!--\s*PageNumber\s*=\s*"(\d+)"\s*-->'), # <!-- PageNumber="N" -->
+    re.compile(r'<!--\s*PageFooter\s*=\s*"第(\d+)頁'),     # <!-- PageFooter="第N頁，共M頁" -->
+]
+
+
+def _extract_page_numbers(text: str) -> list[int]:
+    """從 markdown 文字片段中提取所有頁碼。"""
+    pages: set[int] = set()
+    for pattern in _RE_PAGE_MARKERS:
+        for m in pattern.finditer(text):
+            try:
+                pages.add(int(m.group(1)))
+            except ValueError:
+                pass
+    return sorted(pages)
+
+
+def _build_citations(result, input_dir: str) -> str:
+    """
+    從 Local Search 結果的 context_data 擷取文字片段，
+    提取頁碼並對應來源檔案，回傳格式化的引用出處字串。
+
+    諝註：context_data["sources"] 只有 id（human_readable_id，整數）與 text 兩欄，
+    無 document_id。因此以文字內容匹配 text_units.parquet 來取得 document_id。
+    """
+    ctx = getattr(result, "context_data", None)
+    if not ctx:
+        return ""
+
+    # 取 sources 或 text_units DataFrame
+    sources_df = None
+    for key in ("sources", "text_units"):
+        val = ctx.get(key) if isinstance(ctx, dict) else None
+        if val is not None and hasattr(val, "iterrows") and not val.empty:
+            sources_df = val
+            break
+    if sources_df is None:
+        return ""
+
+    base = Path(input_dir)
+
+    # 1. 從 text_units.parquet 建立 「文字內容前 200 字 → document_id」 映射
+    #    （context_data sources 的 id 是 human_readable_id 整數，不是「ハッシュ ID」，無法直接對熵）
+    text_to_doc: dict[str, str] = {}
+    try:
+        tu_df = pd.read_parquet(str(base / "text_units.parquet"))
+        for _, row in tu_df.iterrows():
+            text_key = str(row.get("text", ""))[:200]
+            text_to_doc[text_key] = str(row.get("document_id", ""))
+    except Exception:
+        pass
+
+    # 2. document_id → 來源檔名（去掉 .md 副檔名）
+    doc_to_title: dict[str, str] = {}
+    try:
+        doc_df = pd.read_parquet(str(base / "documents.parquet"))
+        for _, row in doc_df.iterrows():
+            title = str(row.get("title", ""))
+            if title.endswith(".md"):
+                title = title[:-3]
+            doc_to_title[str(row["id"])] = title
+    except Exception:
+        pass
+
+    # 3. 從每個 source 文字片段提取頁碼，按來源檔名分組
+    file_pages: dict[str, set[int]] = defaultdict(set)
+    for _, row in sources_df.iterrows():
+        text  = str(row.get("text", ""))
+        pages = _extract_page_numbers(text)
+        if not pages:
+            continue
+
+        # 以前 200 字匹配 text_units.parquet，取得 document_id
+        doc_id   = text_to_doc.get(text[:200], "")
+        filename = doc_to_title.get(doc_id, "")
+
+        # fallback：從文字 front matter 抓「來源檔案」
+        if not filename:
+            m = re.search(r'來源檔案:\s*(.+)', text)
+            filename = m.group(1).strip() if m else "（來源不明）"
+
+        for p in pages:
+            file_pages[filename].add(p)
+
+    if not file_pages:
+        return ""
+
+    lines = ["\n📎 引用出處："]
+    for idx, (filename, pages) in enumerate(sorted(file_pages.items()), start=1):
+        page_str = "、".join(str(p) for p in sorted(pages)) if pages else "—"
+        lines.append(f"  [{idx}] {filename}  第 {page_str} 頁")
+    return "\n".join(lines)
+
+
 def _print_context(result) -> None:
     """以條列方式印出 GraphRAG 本次查詢實際使用的參考內容"""
     ctx = result.context_data
@@ -351,10 +454,17 @@ def _print_context(result) -> None:
     print("\n" + "═" * 70)
 
 
-async def run_local_search(engine: LocalSearch, query: str, show_context: bool = False, model_id: str | None = None) -> str:
+async def run_local_search(
+    engine: LocalSearch,
+    query: str,
+    show_context: bool = False,
+    model_id: str | None = None,
+    input_dir: str | None = None,
+) -> str:
     """
     【局部搜索】：適合詢問標案的特定細節。
     例如：「本標案的罰則條款為何？」或「UPS 的施工要求是什麼？」
+    提供 input_dir 時，自動從文字片段提取頁碼並附加引用出處。
     """
     global _stats
     print(f"\n🔍 局部搜索中: {query}")
@@ -370,7 +480,12 @@ async def run_local_search(engine: LocalSearch, query: str, show_context: bool =
     _stats.completion_time = getattr(result, "completion_time", 0.0)
     if show_context:
         _print_context(result)
-    return result.response
+    response = result.response
+    if input_dir:
+        citations = _build_citations(result, input_dir)
+        if citations:
+            response = response + citations
+    return response
 
 
 async def run_global_search(engine: GlobalSearch, query: str, show_context: bool = False, model_id: str | None = None) -> str:
@@ -493,7 +608,7 @@ async def main():
     query = args.query or "請摘要這份文件的主要內容。"
 
     if args.mode == "local":
-        result = await run_local_search(local_engine, query, show_context=args.show_context, model_id=model_id)
+        result = await run_local_search(local_engine, query, show_context=args.show_context, model_id=model_id, input_dir=input_dir)
     else:
         result = await run_global_search(global_engine, query, show_context=args.show_context, model_id=model_id)
 

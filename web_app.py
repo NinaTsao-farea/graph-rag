@@ -887,7 +887,7 @@ async def run_query(req: QueryRequest):
 
             # 執行查詢（async）
             if req.mode == "local":
-                result = await _qt.run_local_search(local_engine, req.query, req.show_context, req.model_id)
+                result = await _qt.run_local_search(local_engine, req.query, req.show_context, req.model_id, input_dir=input_dir)
             else:
                 result = await _qt.run_global_search(global_engine, req.query, req.show_context, req.model_id)
 
