@@ -641,9 +641,10 @@ async def list_index_folders():
 class IndexRequest(BaseModel):
     folder_name: str
     model_id: str | None = None
+    camp: str = "azure"  # azure / gemini / local
 
 
-def _run_index(folder_name: str, log_queue: queue.Queue, model_id: str | None = None) -> None:
+def _run_index(folder_name: str, log_queue: queue.Queue, model_id: str | None = None, camp: str = "azure") -> None:
     """
     在背景執行緒中執行 graphrag index，將 stdout/stderr 轉入 log_queue。
     內建「鶓默債測器」：超過 30 秒無輸出時自動推送進度提示。
@@ -661,21 +662,37 @@ def _run_index(folder_name: str, log_queue: queue.Queue, model_id: str | None = 
 
     root = RAGTEST_BASE / folder_name
     settings_path = root / "settings.yaml"
-
-    # 依選擇的模型開隢決定 settings.yaml 來源
-    profile = INDEX_MODEL_PROFILES.get(model_id or _FIRST_AZURE_KEY) or INDEX_MODEL_PROFILES[_FIRST_AZURE_KEY]
-    template = profile["template"]
-    label = profile["label"]
-
-    if template.exists():
-        shutil.copy(str(template), str(settings_path))
-        log_queue.put(f"🤖 索引模型: {label}  （settings 經複製自 {template}）")
+    print(f'*******************************************')
+    print(f'camp:{camp}  model_id:{model_id}  folder: {folder_name}')
+    if camp == "local":
+        # Local 陣營：直接使用 ragtest/local/{type}/settings.yaml（不複製覆蓋）
+        local_settings = root / "settings.yaml"
+        if local_settings.exists():
+            log_queue.put(f"🏠 Local 陣營：使用現有 {local_settings}")
+        else:
+            # 嘗試從 settings-local.yaml 複製
+            fallback = Path("./settings-local.yaml")
+            if fallback.exists():
+                shutil.copy(str(fallback), str(local_settings))
+                log_queue.put(f"🏠 Local 陣營：settings 複製自 {fallback}")
+            else:
+                log_queue.put(f"❌ 找不到 Local settings（{local_settings} 及 settings-local.yaml 均不存在）")
+                log_queue.put(None)
+                return
     else:
-        log_queue.put(f"⚠️ 找不到 settings 模板 ({template})，嘗試使用現有 settings")
-        if not settings_path.exists():
-            log_queue.put("❌ 無可用的 settings.yaml，索引將失敗")
-            log_queue.put(None)
-            return
+        # Azure / Gemini：依選擇的模型決定 settings.yaml 來源
+        profile = INDEX_MODEL_PROFILES.get(model_id or _FIRST_AZURE_KEY) or INDEX_MODEL_PROFILES[_FIRST_AZURE_KEY]
+        template = profile["template"]
+        label = profile["label"]
+        if template.exists():
+            shutil.copy(str(template), str(settings_path))
+            log_queue.put(f"🤖 索引模型: {label}  （settings 經複製自 {template})")
+        else:
+            log_queue.put(f"⚠️ 找不到 settings 模板 ({template})，嘗試使用現有 settings")
+            if not settings_path.exists():
+                log_queue.put("❌ 無可用的 settings.yaml，索引將失敗")
+                log_queue.put(None)
+                return
 
     cmd = [sys.executable, "-m", "graphrag", "index", "--root", str(root)]
     log_queue.put(f"🚀 執行: {' '.join(cmd)}")
@@ -731,12 +748,12 @@ def _run_index(folder_name: str, log_queue: queue.Queue, model_id: str | None = 
         log_queue.put(None)  # sentinel
 
 
-async def _sse_index_generator(folder_name: str, model_id: str | None = None) -> AsyncGenerator[str, None]:
+async def _sse_index_generator(folder_name: str, model_id: str | None = None, camp: str = "azure") -> AsyncGenerator[str, None]:
     """從 log_queue 讀取索引訊息並以 SSE 格式推送。"""
     log_queue: queue.Queue = queue.Queue()
     loop = asyncio.get_event_loop()
 
-    future = loop.run_in_executor(_executor, _run_index, folder_name, log_queue, model_id)
+    future = loop.run_in_executor(_executor, _run_index, folder_name, log_queue, model_id, camp)
 
     try:
         while True:
@@ -785,7 +802,7 @@ async def index_stream(req: IndexRequest):
     _indexing_lock.add(folder_name)
 
     return StreamingResponse(
-        _sse_index_generator(folder_name, req.model_id),
+        _sse_index_generator(folder_name, req.model_id, req.camp),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

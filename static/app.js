@@ -576,7 +576,7 @@ indexBtn.addEventListener('click', async () => {
     const res = await fetch('/api/index/stream', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ folder_name: folderName, model_id: modelId }),
+      body:    JSON.stringify({ folder_name: folderName, model_id: modelId, camp: currentCamp }),
       signal:  abortController.signal,
     });
 
